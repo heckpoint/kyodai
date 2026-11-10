@@ -103,6 +103,7 @@ func _build_ui() -> void:
 		_description_label = M3Label.new()
 		_description_label.text = description_text
 		_description_label.label_style = M3Label.Style.BODY_MEDIUM
+		_description_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		add_child(_description_label)
 		if show_separator:
 			add_child(HSeparator.new())

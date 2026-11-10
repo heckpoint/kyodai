@@ -372,6 +372,27 @@ func has_direct_storage_tier() -> bool:
 	var direct = plugin.call("hasExtDataRwAccess")
 	return direct == null or direct  # stale AAR fails open
 
+## True when APK installation can proceed without changing Android's install
+## grant. Rooted builds use pm install; other devices keep the system flow.
+func can_install_packages() -> bool:
+	if not is_android():
+		return true
+	var plugin = _get_android_plugin()
+	if plugin != null:
+		var allowed = plugin.call("canInstallPackages")
+		if allowed != null and allowed:
+			return true
+	return can_install_unknown_apps()
+
+func apk_install_uses_root() -> bool:
+	if not is_android():
+		return false
+	var plugin = _get_android_plugin()
+	if plugin == null:
+		return false
+	var available = plugin.call("rootAvailable")
+	return available != null and bool(available)
+
 ## Gate for any APK install. Returns true when the install may proceed.
 ## When the grant is missing, explains the temporary-permission deal and
 ## opens the system toggle; on_granted is stashed and fired automatically
@@ -382,7 +403,7 @@ func has_direct_storage_tier() -> bool:
 func ensure_install_permission(reason: String, on_granted: Callable = Callable()) -> bool:
 	if not is_android():
 		return true
-	if can_install_unknown_apps():
+	if can_install_packages():
 		return true
 	_install_grant_awaiting_retry = true
 	_pending_install_action = on_granted
@@ -407,7 +428,7 @@ func _fire_pending_install_action() -> void:
 ## Called after an install intent was successfully fired. Re-arms the
 ## restore/restart prompts for the next focus return.
 func notify_install_started() -> void:
-	if not is_android():
+	if not is_android() or apk_install_uses_root():
 		return
 	_installs_since_grant += 1
 	_restore_prompt_snoozed = false

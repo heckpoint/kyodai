@@ -6,6 +6,7 @@ class_name FirmwareSubManager
 const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
 const RSM = preload("res://managers/system_manager/resolution_sub_manager.gd")
 const CSM = preload("res://managers/system_manager/config_sub_manager.gd")
+const FIRMWARE_STAGING_PREFIX := ".kyodai-extract-"
 
 ## TEMPORARY (pending a proper identity manager): azahar [System] keys forced
 ## after a force_pull identity install — online LLE modules on, region USA.
@@ -201,7 +202,7 @@ func _collect_file_paths(dir: String, depth: int = 0) -> Array:
 	if depth > 5:
 		return out
 	for entry in FSM.list_dir(dir):
-		if entry == "." or entry == "..":
+		if entry == "." or entry == ".." or entry.begins_with(FIRMWARE_STAGING_PREFIX):
 			continue
 		var full_path = FSM.join_paths(dir, entry)
 		if FSM.dir_exists(full_path):
@@ -239,7 +240,7 @@ func _find_file_path_recursive(dir: String, filename: String) -> String:
 		return ""
 	var entries = FSM.list_dir(dir)
 	for entry in entries:
-		if entry == "." or entry == "..":
+		if entry == "." or entry == ".." or entry.begins_with(FIRMWARE_STAGING_PREFIX):
 			continue
 		var full_path = FSM.join_paths(dir, entry)
 		if entry.to_lower() == filename.to_lower() and FSM.file_exists(full_path):
@@ -261,44 +262,68 @@ func _on_firmware_download_complete(success: bool, download_error: String, _noti
 			callback.call(false, download_error)
 		return
 	
-	print("[FirmwareManager] Firmware downloaded, extracting to: " + firmware_dir)
-	
-	# FSM handles its own extraction notification
+	var staging_dir := FSM.join_paths(firmware_dir, FIRMWARE_STAGING_PREFIX + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000))
+	clear_firmware_cache_for_platform(platform_slug)
+	print("[FirmwareManager] Firmware downloaded, extracting to isolated staging: " + staging_dir)
+
+	# Normalize only this archive's output. Existing firmware (especially an
+	# emulator-generated force_pull identity) must not satisfy the new anchors.
 	FSM.extract_archive_async(
 		temp_path,
-		firmware_dir,
+		staging_dir,
 		"Firmware for " + platform_slug,
-		true,
+		false,
 		func(_info: Dictionary): pass,
 		func(extract_success: bool, error_msg: String):
 			if not extract_success:
-				_retry_or_fail_firmware_extract(temp_path, firmware_dir, platform_slug, emulator_id, callback, error_msg)
+				_retry_or_fail_firmware_extract(temp_path, staging_dir, firmware_dir, platform_slug, emulator_id, callback, error_msg)
 			else:
-				_finish_firmware_extract(true, error_msg, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file())
-	)
+				_finish_firmware_extract(true, error_msg, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file(), temp_path, staging_dir)
+	, true, false)
 
-## Finishes the firmware extraction flow (shared by initial attempt and SAF retry)
-func _finish_firmware_extract(extract_success: bool, error_msg: String, firmware_dir: String, platform_slug: String, emulator_id: String, callback: Callable, artifact_name: String = "") -> void:
+## Finishes firmware extraction in isolated staging, then commits a validated
+## payload into the live emulator firmware directory (also used by SAF retry).
+func _finish_firmware_extract(extract_success: bool, error_msg: String, firmware_dir: String, platform_slug: String, emulator_id: String, callback: Callable, artifact_name: String = "", source_archive: String = "", staging_dir: String = "") -> void:
 	if not extract_success:
+		_cleanup_firmware_staging(staging_dir)
+		clear_firmware_cache_for_platform(platform_slug)
 		push_error("[FirmwareManager] Failed to extract firmware to: " + firmware_dir + ": " + error_msg)
 		launch_manager.firmware_download_completed.emit(platform_slug, false)
 		if callback.is_valid():
 			callback.call(false, error_msg)
 		return
 
-	print("[FirmwareManager] Firmware successfully installed for " + platform_slug)
-
-	# Server zips sometimes wrap the payload in a folder (e.g. bios/); hoist it
-	# so the expected files sit directly under the resolved firmware dir.
+	# Server zips sometimes wrap the payload in folder(s) (e.g. bios/). Locate
+	# and hoist the expected payload before reporting the install as successful.
 	var expected := get_platform_firmware_expected_files(platform_slug)
 	if not expected.is_empty():
-		var norm: Dictionary = FSM.normalize_extraction_root(firmware_dir, expected)
-		if norm.get("moved", false):
-			print("[FirmwareManager] Hoisted firmware payload " + str(norm.get("depth", 0)) + " level(s) up to " + firmware_dir)
+		var norm: Dictionary = FSM.normalize_extraction_root(staging_dir, expected)
+		var status := str(norm.get("status", ""))
+		if not ["normalized", "already_canonical"].has(status):
+			var message := "Downloaded firmware does not contain a usable expected layout: " + str(norm.get("error", status))
+			_cleanup_firmware_staging(staging_dir)
+			clear_firmware_cache_for_platform(platform_slug)
+			push_error("[FirmwareManager] " + message + " (staging: " + staging_dir + ")")
+			launch_manager.firmware_download_completed.emit(platform_slug, false)
+			if callback.is_valid():
+				callback.call(false, message)
+			return
+		if status == "normalized":
+			print("[FirmwareManager] Hoisted firmware payload " + str(norm.get("depth", 0)) + " level(s) inside isolated staging")
 
-	# Canonicalize known filename variants (e.g. xemu's mcpx_1.0.bin ->
-	# mcpx.bin) so every install lands on one naming convention regardless of
-	# what the firmware server called the files.
+	# Only the isolated, validated payload enters the live firmware tree.
+	var commit := FSM.merge_extraction_payload(staging_dir, firmware_dir)
+	if str(commit.get("status", "")) != "committed":
+		var message := "Could not commit extracted firmware: " + str(commit.get("error", "unknown error"))
+		_cleanup_firmware_staging(staging_dir)
+		clear_firmware_cache_for_platform(platform_slug)
+		push_error("[FirmwareManager] " + message)
+		launch_manager.firmware_download_completed.emit(platform_slug, false)
+		if callback.is_valid():
+			callback.call(false, message)
+		return
+
+	# Canonicalize known filename variants after the staged payload is committed.
 	_apply_firmware_renames(firmware_dir, platform_slug)
 
 	if _is_force_pull_firmware(platform_slug):
@@ -311,32 +336,48 @@ func _finish_firmware_extract(extract_success: bool, error_msg: String, firmware
 		if emulator_id == "azahar":
 			_apply_identity_config(firmware_dir)
 
+	if source_archive != "" and FSM.file_exists(source_archive):
+		FSM.delete_file(source_archive)
 	clear_firmware_cache_for_platform(platform_slug)
+	print("[FirmwareManager] Firmware successfully installed for " + platform_slug)
 	launch_manager.firmware_download_completed.emit(platform_slug, true)
 	if callback.is_valid():
 		callback.call(true, "Firmware installed")
 
+func _cleanup_firmware_staging(staging_dir: String) -> void:
+	# Never turn an error path into deletion of the live firmware root.
+	if staging_dir.get_file().begins_with(FIRMWARE_STAGING_PREFIX) and FSM.dir_exists(staging_dir):
+		if FSM.extraction_tree_has_symlinks(staging_dir):
+			push_warning("[FirmwareManager] Leaving unsafe staging in place rather than recursively deleting links: " + staging_dir)
+			return
+		FSM.delete_dir_recursive(staging_dir)
+
 ## Android blocks other apps' /Android/data even with all-files access; a
 ## one-time document-tree grant unlocks it. Prompt just-in-time and retry once.
-func _retry_or_fail_firmware_extract(temp_path: String, firmware_dir: String, platform_slug: String, emulator_id: String, callback: Callable, error_msg: String) -> void:
+func _retry_or_fail_firmware_extract(temp_path: String, staging_dir: String, firmware_dir: String, platform_slug: String, emulator_id: String, callback: Callable, error_msg: String) -> void:
 	if SystemManager.platform.access_route(firmware_dir) != PlatformSubManager.AccessRoute.NONE:
-		_finish_firmware_extract(false, error_msg, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file())
+		_finish_firmware_extract(false, error_msg, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file(), temp_path, staging_dir)
 		return
 
 	print("[FirmwareManager] Extraction into restricted path needs folder access grant, prompting...")
 	SystemManager.platform.ensure_android_data_access(func(granted: bool):
 		if granted:
+			if FSM.extraction_tree_has_symlinks(staging_dir):
+				# Quarantine the unsafe tree and retry into a fresh empty directory.
+				staging_dir = FSM.join_paths(firmware_dir, FIRMWARE_STAGING_PREFIX + str(Time.get_ticks_msec()) + "_retry_" + str(randi() % 1000))
+			else:
+				_cleanup_firmware_staging(staging_dir)
 			FSM.extract_archive_async(
 				temp_path,
-				firmware_dir,
+				staging_dir,
 				"Firmware for " + platform_slug,
-				true,
+				false,
 				func(_info: Dictionary): pass,
 				func(retry_success: bool, retry_error: String):
-					_finish_firmware_extract(retry_success, retry_error, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file())
-			)
+					_finish_firmware_extract(retry_success, retry_error, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file(), temp_path, staging_dir)
+			, true, false)
 		else:
-			_finish_firmware_extract(false, error_msg, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file())
+			_finish_firmware_extract(false, error_msg, firmware_dir, platform_slug, emulator_id, callback, temp_path.get_file(), temp_path, staging_dir)
 	, firmware_dir)
 
 ## Returns the list of expected firmware files for a platform (empty if none).

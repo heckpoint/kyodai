@@ -5,8 +5,10 @@ class_name EmulatorSubManager
 
 const DEBUG_LOG: bool = false
 const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
+const EmulatorExtraction = preload("res://utils/filesystem/emulator_extraction.gd")
 const CSM = preload("res://managers/system_manager/config_sub_manager.gd")
 const RSM = preload("res://managers/system_manager/resolution_sub_manager.gd")
+const EXTRACTION_STAGING_PREFIX := ".kyodai-extract-"
 
 # Track installation progress for UI display only
 var _emulator_install_progress: Dictionary = {}  # emulator_id -> progress text for UI
@@ -170,114 +172,49 @@ func _on_download_manager_extraction_completed(item_id: String, success: bool, e
 			
 			return
 
-## Flattens an extracted directory by moving contents of a single top-level subdirectory up one level
-## This handles zips that extract to a nested directory like "Archive-1.0/file.txt" -> "file.txt"
-func _flatten_extracted_directory(emulator_id: String, extract_to: String, target_folder: String = ""):
-	# Android uses absolute paths, Desktop uses relative paths
-	var extract_path: String
-	if SystemManager.platform.is_android():
-		# Handle "." as current directory
-		if extract_to == ".":
-			extract_path = launch_manager.registry._get_emulator_directory(emulator_id).rstrip("/")
-		else:
-			extract_path = extract_to
-	else:
-		# Handle "." as current directory on desktop too
-		if extract_to == ".":
-			extract_path = launch_manager.registry._get_emulator_directory(emulator_id).rstrip("/")
-		elif extract_to.begins_with("/") or extract_to.begins_with("content://") or extract_to.begins_with("user://") or extract_to.begins_with("res://") or (extract_to.length() > 1 and extract_to[1] == ":"):
-			# extract_to is already an absolute path (Unix, Windows, or Godot virtual filesystem style)
-			extract_path = extract_to
-		else:
-			extract_path = FSM.join_paths(launch_manager.registry._get_emulator_directory(emulator_id), extract_to)
-	
-	# Normalize the path to remove "." and ".." components
-	extract_path = FSM.normalize_path(extract_path)
-	
-	# If a specific target folder is specified, flatten only that one
-	if target_folder != "":
-		var target_path = ""
-		
-		# First try exact match
-		var exact_path = FSM.join_paths(extract_path, target_folder)
-		if FSM.dir_exists(exact_path):
-			target_path = exact_path
-		else:
-			# Try wildcard match against entries in extract_path
-			var candidates = FSM.list_dir(extract_path)
-			for entry in candidates:
-				if entry != "." and entry != ".." and entry.match(target_folder):
-					var entry_path = FSM.join_paths(extract_path, entry)
-					if FSM.dir_exists(entry_path):
-						target_path = entry_path
-						break
-		
-		if target_path == "":
-			return
-		
-		# Get list of items in the target folder
-		var items = FSM.list_dir(target_path)
-		
-		# Move all contents from the subdirectory to the parent
-		for item_name in items:
-			if item_name == "." or item_name == "..":
-				continue
-			
-			var source_path = FSM.join_paths(target_path, item_name)
-			var dest_path = FSM.join_paths(extract_path, item_name)
-			
-			# Check if destination already exists
-			if FSM.file_exists(dest_path) or FSM.dir_exists(dest_path):
-				continue
-			
-			# Move to parent directory
-			if not FSM.move(source_path, dest_path):
-				push_warning("[EmulatorManager] Failed to flatten item: " + source_path + " -> " + dest_path)
-		
-		# Remove the now-empty subdirectory
-		DirAccess.remove_absolute(target_path)
+## Normalizes one archive's isolated output using its registry layout policy.
+func _normalize_extracted_directory(staging_dir: String, extract_config: Dictionary) -> Dictionary:
+	return FSM.normalize_extraction_layout(staging_dir, EmulatorExtraction.layout_options(extract_config))
+
+## Validate every anchor representable inside staging before any live files are
+## changed. Other install checks (packages, manifests, etc.) run after commit.
+func _validate_staged_extraction(staging_dir: String, extract_config: Dictionary) -> bool:
+	for anchor in EmulatorExtraction.expected_anchors(extract_config):
+		if not _staged_anchor_exists(staging_dir, str(anchor)):
+			return false
+	return true
+
+func _staged_anchor_exists(staging_dir: String, anchor: String) -> bool:
+	if not anchor.contains("*") and not anchor.contains("?"):
+		return FSM.file_exists(FSM.join_paths(staging_dir, anchor))
+	var parent := anchor.get_base_dir()
+	var directory := staging_dir if parent == "." else FSM.join_paths(staging_dir, parent)
+	var pattern := anchor.get_file()
+	for entry in FSM.list_dir(directory):
+		if entry.match(pattern) and FSM.file_exists(FSM.join_paths(directory, entry)):
+			return true
+	return false
+
+func _new_extraction_staging_dir(extract_dir: String) -> String:
+	return FSM.join_paths(
+		extract_dir.get_base_dir(),
+		EXTRACTION_STAGING_PREFIX + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000))
+
+func _cleanup_extraction_staging(staging_dir: String) -> void:
+	if staging_dir == "" or not staging_dir.get_file().begins_with(EXTRACTION_STAGING_PREFIX):
 		return
-	
-	# No target folder specified, use original logic (single directory only)
-	var entries = FSM.list_dir(extract_path)
-	
-	# Filter out . and ..
-	var filtered_entries = []
-	for entry in entries:
-		if entry != "." and entry != "..":
-			filtered_entries.append(entry)
-	
-	# If there's exactly one entry and it's a directory, flatten it
-	if filtered_entries.size() == 1:
-		var single_entry = filtered_entries[0]
-		var single_entry_path = FSM.join_paths(extract_path, single_entry)
-		
-		# Check if the single entry is a directory
-		var is_dir = FSM.dir_exists(single_entry_path)
-		if is_dir:
-			# Get all items in the subdirectory
-			var sub_items = FSM.list_dir(single_entry_path)
-			
-			# Move all contents from the subdirectory to the parent
-			for item_name in sub_items:
-				if item_name == "." or item_name == "..":
-					continue
-				
-				var source_path = FSM.join_paths(single_entry_path, item_name)
-				var dest_path = FSM.join_paths(extract_path, item_name)
-				
-				# Check if destination already exists
-				if FSM.file_exists(dest_path) or FSM.dir_exists(dest_path):
-					continue
-				
-				# Move to parent directory
-				var move_success = FSM.move(source_path, dest_path)
-				if DEBUG_LOG: print("[EmulatorManager] Flattening: move result=" + str(move_success))
-				if not move_success:
-					push_warning("[EmulatorManager] Failed to flatten item: " + source_path + " -> " + dest_path)
-			
-			# Remove the now-empty subdirectory
-			DirAccess.remove_absolute(single_entry_path)
+	if not FSM.dir_exists(staging_dir):
+		return
+	if FSM.extraction_tree_has_symlinks(staging_dir):
+		push_warning("[EmulatorManager] Leaving unsafe extraction staging in place: " + staging_dir)
+		return
+	FSM.delete_dir_recursive(staging_dir)
+
+func _fail_extraction(emulator_id: String, progress_message: String, staging_dir: String = "") -> void:
+	_cleanup_extraction_staging(staging_dir)
+	_emulator_install_progress[emulator_id] = progress_message
+	_end_force_install(emulator_id)
+	launch_manager.emulator_extraction_completed.emit(emulator_id, false)
 
 func download_emulator(emulator_id: String) -> bool:
 	# Check if already downloading/extracting. Clean up stale entries that no
@@ -828,7 +765,6 @@ func _execute_batch_url_download_step(emulator_id: String, step_index: int, batc
 func _execute_extract_step(emulator_id: String, step_index: int, extract_config: Dictionary) -> bool:
 	var extract_to = extract_config.get("extract_to", ".")
 	var strip_top = extract_config.get("strip_top_directory", false)
-	var flatten_target = extract_config.get("flatten_target", "")
 	
 	var emulator = launch_manager.registry.get_emulator(emulator_id)
 	var install_steps = emulator.get("install", [])
@@ -849,7 +785,7 @@ func _execute_extract_step(emulator_id: String, step_index: int, extract_config:
 	
 	if is_batch_mode:
 		# Batch mode: extract all matching archives
-		return _execute_batch_extract_step(emulator_id, step_index, extract_config, extract_dir, strip_top, flatten_target)
+		return _execute_batch_extract_step(emulator_id, step_index, extract_config, extract_dir, strip_top)
 	
 	# Single archive mode (default behavior)
 	# First, check for explicit expected_file pattern in extract_config
@@ -917,44 +853,58 @@ func _execute_extract_step(emulator_id: String, step_index: int, extract_config:
 	# Notify UI that extraction has started
 	launch_manager.emulator_extraction_started.emit(emulator_id)
 	
-	# Queue extraction via SystemManager.download (notification suppressed during
-	# update-all sessions, which show their own aggregate snackbar instead)
-	var item_id = SystemManager.download.queue_extraction(archive_path, extract_dir, "emulator", step_display_name, true, suppress_step_notifications)
+	# Strip-enabled installs extract into isolated staging so old live anchors
+	# cannot mask a wrapped update. Other extraction types retain their path.
+	var staging_dir := ""
+	var operation_extract_dir: String = extract_dir
+	if strip_top:
+		staging_dir = _new_extraction_staging_dir(extract_dir)
+		if not FSM.make_dir_recursive(staging_dir):
+			_fail_extraction(emulator_id, "Extraction staging failed", staging_dir)
+			return false
+		operation_extract_dir = staging_dir
+
+	var item_id = SystemManager.download.queue_extraction(
+		archive_path, operation_extract_dir, "emulator", step_display_name, not strip_top, suppress_step_notifications)
 	if item_id == "":
 		push_error("[EmulatorManager] Failed to queue extraction for: " + emulator_id)
+		_fail_extraction(emulator_id, "Extraction failed", staging_dir)
 		return false
 	
-	# Create callback for single archive extraction
 	var extraction_callback = func(success: bool, _message: String):
 		if not success:
-			_emulator_install_progress[emulator_id] = "Extraction failed"
-			_end_force_install(emulator_id)
-			launch_manager.emulator_extraction_completed.emit(emulator_id, false)
+			_fail_extraction(emulator_id, "Extraction failed", staging_dir)
 			return
-		
-		# Handle post-extraction flattening
-		print("[EmulatorManager] Extraction callback called, strip_top=" + str(strip_top) + ", flatten_target=" + flatten_target)
+
 		if strip_top:
-			if DEBUG_LOG: print("[EmulatorManager] Calling _flatten_extracted_directory with extract_dir=" + extract_dir)
-			_flatten_extracted_directory(emulator_id, extract_dir, flatten_target)
-		else:
-			if DEBUG_LOG: print("[EmulatorManager] Skipping flattening, strip_top is false")
-		
-		# Validate extraction
+			var normalization := _normalize_extracted_directory(staging_dir, extract_config)
+			var status := str(normalization.get("status", ""))
+			if not ["normalized", "already_canonical"].has(status):
+				push_error("[EmulatorManager] Layout normalization failed for " + emulator_id + ": " + str(normalization.get("error", status)))
+				_fail_extraction(emulator_id, "Layout normalization failed", staging_dir)
+				return
+			if not _validate_staged_extraction(staging_dir, extract_config):
+				push_error("[EmulatorManager] Staged validation failed for " + emulator_id)
+				_fail_extraction(emulator_id, "Staged validation failed", staging_dir)
+				return
+			var commit := FSM.merge_extraction_payload(staging_dir, extract_dir)
+			if str(commit.get("status", "")) != "committed":
+				push_error("[EmulatorManager] Extraction commit failed for " + emulator_id + ": " + str(commit.get("error", "unknown error")))
+				_fail_extraction(emulator_id, "Extraction commit failed", staging_dir)
+				return
+
+		# Full registry validation runs against the committed live install.
 		var validate_config = extract_config.get("validate", {})
 		if not _validate_step(emulator_id, validate_config):
 			push_error("[EmulatorManager] Validation failed after extraction: " + emulator_id)
-			_emulator_install_progress[emulator_id] = "Validation failed"
-			launch_manager.emulator_extraction_completed.emit(emulator_id, false)
+			_fail_extraction(emulator_id, "Validation failed")
 			return
-		
-		# Clear validation cache so UI doesn't show a stale Resume state
+
+		# Strip-enabled archives are retained until every validation succeeds.
+		if strip_top and FSM.file_exists(archive_path):
+			FSM.delete_file(archive_path)
 		_erase_validation_cache(emulator_id)
-		
-		# Notify UI that extraction completed successfully
 		launch_manager.emulator_extraction_completed.emit(emulator_id, true)
-		
-		# Progress to next step
 		_execute_install_step(emulator_id, step_index + 1)
 	
 	# Track extraction completion
@@ -969,7 +919,7 @@ func _execute_extract_step(emulator_id: String, step_index: int, extract_config:
 	return true
 
 ## Executes batch extraction for multiple archives
-func _execute_batch_extract_step(emulator_id: String, step_index: int, extract_config: Dictionary, extract_dir: String, strip_top: bool, flatten_target: String) -> bool:
+func _execute_batch_extract_step(emulator_id: String, step_index: int, extract_config: Dictionary, extract_dir: String, strip_top: bool) -> bool:
 	var emulator_dir = launch_manager.registry._get_emulator_directory(emulator_id)
 	var archive_paths = []
 	
@@ -1040,77 +990,97 @@ func _execute_batch_extract_step(emulator_id: String, step_index: int, extract_c
 			true  # pinned
 		)
 	
-	# Queue extraction for all archives
-	for archive_path in archive_paths:
-		var item_id = SystemManager.download.queue_extraction(archive_path, extract_dir, "emulator", step_display_name, true, true)
-		if item_id == "":
-			push_error("[EmulatorManager] Failed to queue extraction for: " + archive_path)
-			progress.failed += 1
-		else:
-			extraction_ids.append(item_id)
-	
-	if extraction_ids.is_empty():
-		push_error("[EmulatorManager] No extractions could be queued for batch: " + emulator_id)
-		SystemManager.notifications.dismiss_notification(batch_notification_id)
-		return false
-	
-	# Create callback for batch extraction (shared by all archives)
-	var batch_callback = func(success: bool, _message: String):
+	var staging_by_item := {}
+	var archive_by_item := {}
+	var batch_callback = func(success: bool, _message: String, completed_item_id: String):
 		progress.completed += 1
-		
+		var staging_dir := str(staging_by_item.get(completed_item_id, ""))
 		if not success:
 			progress.failed += 1
-			
-		# Update progress
+			_cleanup_extraction_staging(staging_dir)
+		elif strip_top:
+			var normalization := _normalize_extracted_directory(staging_dir, extract_config)
+			var status := str(normalization.get("status", ""))
+			if not ["normalized", "already_canonical"].has(status):
+				progress.failed += 1
+				push_error("[EmulatorManager] Batch layout normalization failed for " + emulator_id + ": " + str(normalization.get("error", status)))
+				_cleanup_extraction_staging(staging_dir)
+			elif not _validate_staged_extraction(staging_dir, extract_config):
+				progress.failed += 1
+				push_error("[EmulatorManager] Batch staged validation failed for " + emulator_id)
+				_cleanup_extraction_staging(staging_dir)
+			else:
+				var commit := FSM.merge_extraction_payload(staging_dir, extract_dir)
+				if str(commit.get("status", "")) != "committed":
+					progress.failed += 1
+					push_error("[EmulatorManager] Batch extraction commit failed for " + emulator_id + ": " + str(commit.get("error", "unknown error")))
+					_cleanup_extraction_staging(staging_dir)
+
 		_emulator_install_progress[emulator_id] = step_display_name + " (" + str(progress.completed) + "/" + str(total_archives) + ")"
-		
-		# Check if all extractions are complete
-		if progress.completed >= total_archives:
-			# Dismiss batch notification
-			SystemManager.notifications.dismiss_notification(batch_notification_id)
-			
-			if progress.failed > 0:
-				_emulator_install_progress[emulator_id] = "Extraction failed"
-				launch_manager.emulator_extraction_completed.emit(emulator_id, false)
-				return
-			
-			# Handle post-extraction flattening
-			if strip_top:
-				_flatten_extracted_directory(emulator_id, extract_dir, flatten_target)
-			
-			# Persist a manifest of expected default cores
-			# so validation knows exactly which files should be present.
-			if emulator_id == "retroarch":
-				var manifest: Dictionary = launch_manager.core.build_default_core_manifest(emulator_id) as Dictionary
-				launch_manager.core.write_manifest(emulator_id, manifest)
-			
-			# Validate extraction
-			var validate_config = extract_config.get("validate", {})
-			if not _validate_step(emulator_id, validate_config):
-				push_error("[EmulatorManager] Validation failed after batch extraction: " + emulator_id)
-				_emulator_install_progress[emulator_id] = "Validation failed"
-				launch_manager.emulator_extraction_completed.emit(emulator_id, false)
-				return
-			
-			# Clear validation cache so UI doesn't show a stale Resume state
-			_erase_validation_cache(emulator_id)
-			
-			# Notify UI that extraction completed successfully
-			launch_manager.emulator_extraction_completed.emit(emulator_id, true)
-			
-			# Progress to next step
-			_execute_install_step(emulator_id, step_index + 1)
-	
-	# Track extraction completion for each archive
-	for item_id in extraction_ids:
+		if progress.completed < total_archives:
+			return
+
+		SystemManager.notifications.dismiss_notification(batch_notification_id)
+		if progress.failed > 0:
+			for remaining_staging in staging_by_item.values():
+				_cleanup_extraction_staging(str(remaining_staging))
+			_fail_extraction(emulator_id, "Extraction failed")
+			return
+
+		if emulator_id == "retroarch":
+			var manifest: Dictionary = launch_manager.core.build_default_core_manifest(emulator_id) as Dictionary
+			launch_manager.core.write_manifest(emulator_id, manifest)
+
+		var validate_config = extract_config.get("validate", {})
+		if not _validate_step(emulator_id, validate_config):
+			push_error("[EmulatorManager] Validation failed after batch extraction: " + emulator_id)
+			_fail_extraction(emulator_id, "Validation failed")
+			return
+
+		if strip_top:
+			for archive_path in archive_by_item.values():
+				if FSM.file_exists(str(archive_path)):
+					FSM.delete_file(str(archive_path))
+		_erase_validation_cache(emulator_id)
+		launch_manager.emulator_extraction_completed.emit(emulator_id, true)
+		_execute_install_step(emulator_id, step_index + 1)
+
+	# Stage and queue every archive independently. Queue/staging failures count
+	# as completed failures so the shared callback cannot stall below the total.
+	for archive_path in archive_paths:
+		var staging_dir := ""
+		var operation_extract_dir: String = extract_dir
+		if strip_top:
+			staging_dir = _new_extraction_staging_dir(extract_dir)
+			if not FSM.make_dir_recursive(staging_dir):
+				progress.completed += 1
+				progress.failed += 1
+				continue
+			operation_extract_dir = staging_dir
+		var item_id = SystemManager.download.queue_extraction(
+			archive_path, operation_extract_dir, "emulator", step_display_name, not strip_top, true)
+		if item_id == "":
+			_cleanup_extraction_staging(staging_dir)
+			progress.completed += 1
+			progress.failed += 1
+			push_error("[EmulatorManager] Failed to queue extraction for: " + archive_path)
+			continue
+		extraction_ids.append(item_id)
+		staging_by_item[item_id] = staging_dir
+		archive_by_item[item_id] = archive_path
 		_pending_emulator_downloads[item_id] = {
 			"emulator_id": emulator_id,
 			"context": "extraction",
 			"step_index": step_index,
 			"step_config": extract_config,
-			"callback": batch_callback
+			"callback": batch_callback.bind(item_id)
 		}
-	
+
+	if extraction_ids.is_empty():
+		push_error("[EmulatorManager] No extractions could be queued for batch: " + emulator_id)
+		SystemManager.notifications.dismiss_notification(batch_notification_id)
+		_fail_extraction(emulator_id, "Extraction failed")
+		return false
 	return true
 
 func _validate_step(emulator_id: String, validate_config: Dictionary) -> bool:

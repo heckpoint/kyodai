@@ -6,6 +6,7 @@ class_name GameSubManager
 const DEBUG_LOG: bool = false
 const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
 const CSM = preload("res://managers/system_manager/config_sub_manager.gd")
+const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
 const _SigilRunner = preload("res://utils/identity/sigil_runner.gd")
 
 var launch_manager: Node
@@ -594,15 +595,19 @@ func _prepare_xenia_archive_game(game: GameResource, intent: LaunchIntent, rom_p
 	if DEBUG_LOG: print("[GameManager] Xenia: XBLA extraction path: " + extract_path)
 
 	if not _xbox360_game_has_files(extract_path):
-		# Remove stale/partial extraction before re-extracting
-		if FSM.dir_exists(extract_path):
-			if DEBUG_LOG: print("[GameManager] Xenia: Removing stale extraction: " + extract_path)
-			FSM.delete_dir_recursive(extract_path)
-
-		var extract_success := await _extract_xenia_archive(archive_path, extract_path, is_shuffler)
-		if not extract_success or not _xbox360_game_has_files(extract_path):
+		# Preserve Xbox's internal layout (default.xex/STFS discovery already
+		# tolerates wrappers), but stage and replace the owned title root as one unit.
+		var staging_dir := GameExtraction.staging_path(extract_path)
+		var extract_success := await _extract_xenia_archive(archive_path, staging_dir, is_shuffler)
+		if not extract_success or not _xbox360_game_has_files(staging_dir):
+			_cleanup_game_staging(staging_dir)
 			push_error("[GameManager] Xenia: Extraction failed or produced no launchable files: " + archive_path)
 			SystemManager.notifications.show_notification("Failed to extract Xbox 360 game archive", SystemManager.notifications.Type.ERROR)
+			return false
+		var commit := FSM.replace_extraction_payload(staging_dir, extract_path)
+		if str(commit.get("status", "")) != "replaced":
+			_cleanup_game_staging(staging_dir)
+			push_error("[GameManager] Xenia: Failed to commit extracted game: " + str(commit.get("error", "unknown error")))
 			return false
 
 	intent.rom_path = extract_path
@@ -654,6 +659,25 @@ func _await_extraction(item_id: String, log_tag: String, timeout_sec: float = 18
 
 	print("[%s] Extraction complete, success=%s" % [log_tag, str(tracker.success)])
 	return tracker.success
+
+func _cleanup_game_staging(staging_dir: String) -> void:
+	if staging_dir == "" or not GameExtraction.is_staging_path(staging_dir) or not FSM.dir_exists(staging_dir):
+		return
+	if FSM.extraction_tree_has_symlinks(staging_dir):
+		push_warning("[GameManager] Leaving unsafe extraction staging in place: " + staging_dir)
+		return
+	FSM.delete_dir_recursive(staging_dir)
+
+func _app_game_has_files(game_path: String) -> bool:
+	return FSM.file_exists(FSM.join_paths(game_path, "sce_sys/param.sfo")) and FSM.file_exists(FSM.join_paths(game_path, "eboot.bin"))
+
+func _app_game_matches_title(game_path: String, expected_title_id: String) -> bool:
+	if expected_title_id == "":
+		return false
+	var sfo := FSM.read_file_bytes(FSM.join_paths(game_path, "sce_sys/param.sfo"))
+	if sfo.is_empty():
+		return false
+	return TitleIDParser.get_title_id_from_sfo_bytes(sfo).to_upper() == expected_title_id.to_upper()
 
 ## Extracts an XBLA archive to the specified directory (archive is kept)
 func _extract_xenia_archive(archive_path: String, extract_to: String, suppress_notification: bool = false) -> bool:
@@ -817,15 +841,15 @@ func _prepare_vita3k_game(game: GameResource, intent: LaunchIntent, is_shuffler:
 	if DEBUG_LOG: print("[GameManager] Vita3K: Checking extracted files at: " + vita_app_path)
 	
 	# Check if already extracted by looking for actual game files, not just directory existence
-	var is_extracted = _vita_app_has_game_files(vita_app_path)
+	var is_extracted = _vita_app_has_game_files(vita_app_path) and _app_game_matches_title(vita_app_path, title_id)
 	if DEBUG_LOG: print("[GameManager] Vita3K: has_game_files = " + str(is_extracted))
 	if is_extracted:
 		_ensure_vita3k_license(rom_path, emulator_dir, title_id)
 		return true
 	
-	# Extract ZIP to Vita3K ux0/app directory (ZIP contains the TitleID folder)
-	# We extract to the parent directory (ux0/app) so the ZIP's root folder lands correctly
-	var extract_parent = vita_app_path.get_base_dir()
+	# Extract beside the owned title root, then normalize and replace it as one
+	# unit. Shared ux0/app is never scanned for the current archive's payload.
+	var staging_dir := GameExtraction.staging_path(vita_app_path)
 	
 	# Show persistent pulsing notification during extraction
 	var notify_id = SystemManager.notifications.show_notification(
@@ -838,15 +862,32 @@ func _prepare_vita3k_game(game: GameResource, intent: LaunchIntent, is_shuffler:
 		true,  # Pulsing
 		true  # pinned
 	)
-	if DEBUG_LOG: print("[GameManager] Vita3K: Extracting ZIP to: " + extract_parent)
+	if DEBUG_LOG: print("[GameManager] Vita3K: Extracting ZIP to staging: " + staging_dir)
 	
-	var extract_success = await _extract_vita_zip(rom_path, extract_parent, title_id)
+	var extract_success = await _extract_vita_zip(rom_path, staging_dir, title_id)
 	
 	# Dismiss the extraction notification
 	SystemManager.notifications.dismiss_notification(notify_id)
 	
 	if not extract_success:
+		_cleanup_game_staging(staging_dir)
 		push_error("[GameManager] Vita3K: Failed to extract game to " + vita_app_path)
+		return false
+
+	var normalization := FSM.normalize_extraction_layout(staging_dir, GameExtraction.app_layout_options())
+	var status := str(normalization.get("status", ""))
+	if not ["normalized", "already_canonical"].has(status):
+		_cleanup_game_staging(staging_dir)
+		push_error("[GameManager] Vita3K: Unexpected archive layout: " + str(normalization.get("error", status)))
+		return false
+	if not _app_game_has_files(staging_dir) or not _app_game_matches_title(staging_dir, title_id):
+		_cleanup_game_staging(staging_dir)
+		push_error("[GameManager] Vita3K: Extracted payload is incomplete or has the wrong TitleID")
+		return false
+	var commit := FSM.replace_extraction_payload(staging_dir, vita_app_path)
+	if str(commit.get("status", "")) != "replaced":
+		_cleanup_game_staging(staging_dir)
+		push_error("[GameManager] Vita3K: Failed to commit extracted game: " + str(commit.get("error", "unknown error")))
 		return false
 	
 	print("[GameManager] Vita3K: Extraction successful")
@@ -867,15 +908,7 @@ func _prepare_vita3k_game(game: GameResource, intent: LaunchIntent, is_shuffler:
 
 ## Checks whether the given Vita3K app path contains actual game files
 func _vita_app_has_game_files(vita_app_path: String) -> bool:
-	# Use SystemManager.filesystem to list files
-	var files = FSM.list_dir(vita_app_path)
-	# Filter out . and .. entries - they don't count as game files
-	var actual_files = 0
-	for f in files:
-		if f != "." and f != "..":
-			actual_files += 1
-	if DEBUG_LOG: print("[GameManager] Vita3K: _vita_app_has_game_files: found " + str(actual_files) + " actual files in " + vita_app_path)
-	return actual_files > 0
+	return _app_game_has_files(vita_app_path)
 
 ## Extracts Vita game ZIP with progress tracking
 func _extract_vita_zip(zip_path: String, extract_to: String, title_id: String) -> bool:
@@ -1243,16 +1276,14 @@ func _prepare_rpcs3_game(game: GameResource, intent: LaunchIntent, is_shuffler: 
 	# Determine extraction target
 	var extract_target: String
 	if to_emu_dir:
-		# Extract directly into the emulator's games dir. We default to the
-		# disc path; if the game is digital format it's relocated after
-		# extraction.
-		extract_target = emu_disc_path
-		if DEBUG_LOG: print("[GameManager] RPCS3: Extracting directly to: " + extract_target)
+		# Stage beside the disc root; digital games commit to dev_hdd0 after
+		# their authoritative SFO identifies that layout.
+		extract_target = GameExtraction.staging_path(emu_disc_path)
+		if DEBUG_LOG: print("[GameManager] RPCS3: Extracting to isolated staging: " + extract_target)
 	else:
-		# No emulator-managed location (e.g. unmanaged desktop install):
-		# extract to temp first (same drive, no permission issues)
-		extract_target = extract_path + "_tmp"
-		if DEBUG_LOG: print("[GameManager] RPCS3: Extracting to temp: " + extract_target)
+		# Unmanaged installs stage beside the library-owned title root.
+		extract_target = GameExtraction.staging_path(extract_path)
+		if DEBUG_LOG: print("[GameManager] RPCS3: Extracting to isolated staging: " + extract_target)
 	
 	# Remove stale/partial game folders so re-extraction starts clean and the
 	# unwrap/move steps don't collide with leftover files (e.g. a PARAM.SFO left
@@ -1274,6 +1305,7 @@ func _prepare_rpcs3_game(game: GameResource, intent: LaunchIntent, is_shuffler: 
 	print("[GameManager] RPCS3: Extraction returned: " + str(extract_success))
 	
 	if not extract_success:
+		_cleanup_game_staging(extract_target)
 		push_error("[GameManager] RPCS3: Failed to extract PS3 game ZIP: " + zip_path)
 		return false
 	
@@ -1281,14 +1313,19 @@ func _prepare_rpcs3_game(game: GameResource, intent: LaunchIntent, is_shuffler: 
 	
 	if sfo_path == "":
 		push_error("[GameManager] RPCS3: PARAM.SFO not found after extraction at: " + extract_target)
-		FSM.delete_dir_recursive(extract_target)
+		_cleanup_game_staging(extract_target)
 		return false
 	
 	print("[GameManager] RPCS3: Found PARAM.SFO at: " + sfo_path)
-	var sfo_dir = sfo_path.get_base_dir()
+	var ps3_layout := GameExtraction.ps3_layout_from_sfo(sfo_path)
+	var extracted_title_id := TitleIDParser.get_title_id_from_sfo_bytes(FSM.read_file_bytes(sfo_path))
+	if extracted_title_id.to_upper() != title_id.to_upper():
+		_cleanup_game_staging(extract_target)
+		push_error("[GameManager] RPCS3: Extracted TitleID does not match the archive identity")
+		return false
 	
 	# Determine if disc or digital format
-	var is_disc_format = sfo_dir.get_file().to_upper() == "PS3_GAME"
+	var is_disc_format := bool(ps3_layout["is_disc"])
 	if DEBUG_LOG: print("[GameManager] RPCS3: Format detected: " + ("disc" if is_disc_format else "digital"))
 	
 	# Determine final path
@@ -1297,48 +1334,28 @@ func _prepare_rpcs3_game(game: GameResource, intent: LaunchIntent, is_shuffler: 
 		final_extract_path = emu_disc_path if is_disc_format else emu_digital_path
 		if DEBUG_LOG: print("[GameManager] RPCS3: Emulator-managed final path: " + final_extract_path)
 	
-	var game_root = sfo_dir.get_base_dir() if is_disc_format else sfo_dir
-	if to_emu_dir and game_root != final_extract_path:
-		if is_disc_format:
-			# Disc: staging == final, so the wrapper folder sits inside the
-			# final path and can be unwrapped in place.
-			if DEBUG_LOG: print("[GameManager] RPCS3: Wrapper folder detected: " + game_root.get_file())
-			if DEBUG_LOG: print("[GameManager] RPCS3: Unwrapping to: " + final_extract_path)
-			if not _unwrap_ps3_wrapper(final_extract_path):
-				return false
-		else:
-			# Digital: the game stages into the disc path but must live in
-			# dev_hdd0/game/<TID>. Relocate the game root there — unwrapping
-			# the final path can't work, it doesn't exist yet.
-			print("[GameManager] RPCS3: Relocating digital game from " + game_root + " to " + final_extract_path)
-			if not FSM.move_dir_contents(game_root, final_extract_path):
-				push_error("[GameManager] RPCS3: Failed to relocate digital game to " + final_extract_path)
-				# Degraded fallback (e.g. emulator-created 0750 dev_hdd0 dirs
-				# blocking SAF writes on Android): boot from the staging path.
-				if _unwrap_ps3_wrapper(extract_target):
-					push_warning("[GameManager] RPCS3: Booting digital game from staging path instead: " + extract_target)
-					final_extract_path = extract_target
-				else:
-					return false
-	elif not to_emu_dir:
-		# Fallback: move from temp to final
-		if DEBUG_LOG: print("[GameManager] RPCS3: Moving game files from " + game_root + " to " + final_extract_path)
-		if not FSM.move_dir_contents(game_root, final_extract_path):
-			push_error("[GameManager] RPCS3: Failed to move game files to " + final_extract_path)
-			FSM.delete_dir_recursive(extract_target)
-			return false
-		FSM.delete_dir_recursive(extract_target)
+	var game_root := str(ps3_layout["game_root"])
+	if not _ps3_game_has_files(game_root):
+		_cleanup_game_staging(extract_target)
+		push_error("[GameManager] RPCS3: Selected game root is missing PARAM.SFO or USRDIR/EBOOT.BIN")
+		return false
+	var commit := FSM.replace_extraction_payload(game_root, final_extract_path)
+	if str(commit.get("status", "")) != "replaced" and to_emu_dir and not is_disc_format:
+		# Preserve the old degraded path when dev_hdd0 is not writable: a
+		# digital game may still boot from the emulator's disc directory.
+		push_warning("[GameManager] RPCS3: Digital commit failed; trying disc fallback: " + str(commit.get("error", "unknown error")))
+		final_extract_path = emu_disc_path
+		commit = FSM.replace_extraction_payload(game_root, final_extract_path)
+	if str(commit.get("status", "")) != "replaced":
+		_cleanup_game_staging(extract_target)
+		push_error("[GameManager] RPCS3: Failed to commit extracted game: " + str(commit.get("error", "unknown error")))
+		return false
+
+	# The selected game root has moved out; wrapper shells and stray archive
+	# entries remain only in isolated staging. RAPs are installed from the ZIP.
+	_cleanup_game_staging(extract_target)
 	
-	# Remove any leftover empty wrapper shells of arbitrary depth
-	# (e.g. "Game Name/" left behind after unwrapping "Game Name/PS3_GAME/")
-	FSM.prune_empty_dirs(final_extract_path)
-	if to_emu_dir and extract_target != final_extract_path:
-		# Digital games stage into the disc path first; after relocation the
-		# staging shell only holds archive junk (wrapper shells, stray RAPs —
-		# those are installed to exdata separately), so drop it entirely.
-		if FSM.dir_exists(extract_target):
-			FSM.delete_dir_recursive(extract_target)
-	
+
 	if not _ps3_game_has_files(final_extract_path):
 		push_error("[GameManager] RPCS3: Game files missing after extraction at: " + final_extract_path)
 		SystemManager.notifications.show_notification("Failed to install PS3 game - files missing", SystemManager.notifications.Type.ERROR)
@@ -1415,9 +1432,7 @@ func _unwrap_ps3_wrapper(folder_path: String) -> bool:
 		push_warning("[GameManager] RPCS3: _unwrap_ps3_wrapper: folder does not exist: " + folder_path)
 		return false
 
-	var sfo_path = FSM.find_file_recursive(folder_path, "PARAM.SFO")
-	if sfo_path == "":
-		sfo_path = FSM.find_file_recursive(folder_path, "PARAM.sfo")
+	var sfo_path = _find_ps3_param_sfo(folder_path)
 	if sfo_path == "":
 		push_warning("[GameManager] RPCS3: _unwrap_ps3_wrapper: no PARAM.SFO under: " + folder_path)
 		return false
@@ -1633,8 +1648,6 @@ func _install_rpcs3_raps_with_7z(zip_path: String, exdata_dir: String) -> Array:
 ## ZAR archives are loaded by shadPS4 directly, so they skip extraction
 ## Returns true if preparation succeeded, false on error
 func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
-	if game.get_active_title_id() != "":
-		return true
 	if DEBUG_LOG: print("[GameManager] shadPS4: _prepare_shadps4_game called for: " + game.get_display_name())
 	
 	if not game or not intent:
@@ -1679,7 +1692,7 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	var extract_path = FSM.join_paths(rom_parent_dir, title_id)
 	if DEBUG_LOG: print("[GameManager] shadPS4: Extraction path: " + extract_path)
 	
-	if _shadps4_game_has_files(extract_path):
+	if _shadps4_game_has_files(extract_path) and _app_game_matches_title(extract_path, title_id):
 		if DEBUG_LOG: print("[GameManager] shadPS4: Game already extracted at: " + extract_path)
 		return true
 	
@@ -1703,11 +1716,10 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	)
 	if DEBUG_LOG: print("[GameManager] shadPS4: Extracting ZIP to: " + extract_path)
 
-	# Bachata S4's library scans a shared SAF games folder for CUSAxxxxx
-	# directories, so extract flat into the roms folder (the ZIP already
-	# contains the CUSAxxxxx root) instead of nesting under <TitleID>/
-	var extract_target = rom_parent_dir if is_bachatas4 else extract_path
-	var extract_success := await _extract_shadps4_zip(rom_path, extract_target)
+	# Both backends consume <rom-parent>/<TitleID>; normalize the payload in a
+	# sibling staging root instead of relying on the archive's raw nesting.
+	var staging_dir := GameExtraction.staging_path(extract_path)
+	var extract_success := await _extract_shadps4_zip(rom_path, staging_dir)
 	
 	# Dismiss the extraction notification
 	SystemManager.notifications.dismiss_notification(shadps4_notify_id)
@@ -1715,7 +1727,24 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	if DEBUG_LOG: print("[GameManager] shadPS4: _extract_shadps4_zip returned: " + str(extract_success))
 	
 	if not extract_success:
+		_cleanup_game_staging(staging_dir)
 		push_error("[GameManager] shadPS4: Failed to extract PS4 game ZIP: " + rom_path)
+		return false
+
+	var normalization := FSM.normalize_extraction_layout(staging_dir, GameExtraction.app_layout_options())
+	var status := str(normalization.get("status", ""))
+	if not ["normalized", "already_canonical"].has(status):
+		_cleanup_game_staging(staging_dir)
+		push_error("[GameManager] shadPS4: Unexpected archive layout: " + str(normalization.get("error", status)))
+		return false
+	if not _app_game_has_files(staging_dir) or not _app_game_matches_title(staging_dir, title_id):
+		_cleanup_game_staging(staging_dir)
+		push_error("[GameManager] shadPS4: Extracted payload is incomplete or has the wrong TitleID")
+		return false
+	var commit := FSM.replace_extraction_payload(staging_dir, extract_path)
+	if str(commit.get("status", "")) != "replaced":
+		_cleanup_game_staging(staging_dir)
+		push_error("[GameManager] shadPS4: Failed to commit extracted game: " + str(commit.get("error", "unknown error")))
 		return false
 	
 	print("[GameManager] shadPS4: Extraction complete")
@@ -1744,19 +1773,7 @@ func _prepare_shadps4_zar(game: GameResource, rom_path: String) -> bool:
 
 ## Checks if a shadPS4 game directory has actual game files
 func _shadps4_game_has_files(game_path: String) -> bool:
-	if not FSM.dir_exists(game_path):
-		return false
-	
-	var entries = FSM.list_dir(game_path)
-	var actual_files = 0
-	for entry in entries:
-		if entry == "." or entry == "..":
-			continue
-		actual_files += 1
-	
-	if DEBUG_LOG: print("[GameManager] shadPS4: _shadps4_game_has_files: found " + str(actual_files) + " entries in " + game_path)
-	return actual_files > 0
-
+	return _app_game_has_files(game_path)
 
 ## Extracts a PS4 game ZIP file to the specified directory (NO TIMEOUT)
 func _extract_shadps4_zip(zip_path: String, extract_to: String) -> bool:

@@ -11,6 +11,8 @@ const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
 const CSM = preload("res://managers/system_manager/config_sub_manager.gd")
 const RSM = preload("res://managers/system_manager/resolution_sub_manager.gd")
 const _ContentHash = preload("res://utils/sync/content_hash.gd")
+const SaveLayout = preload("res://utils/filesystem/save_layout.gd")
+const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
 # Gavel is a global class (utils/sync/gavel.gd); no preload const needed.
 const SLOT_DEFAULT := ""
 const MAX_FILE_SIZE := 100 * 1024 * 1024
@@ -201,9 +203,8 @@ func _init_strategies() -> void:
 				return _save_dir,
 			"save_name": func(game: GameResource, local_file_path: String) -> String:
 				return local_file_path.get_file() if local_file_path != "" else _get_save_identity(game).id,
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				var folder_name = src.get_file()
-				return FSM.zip_directory(src, dst, MAX_FILE_SIZE, folder_name),
+			"zip": func(src: String, dst: String, game: GameResource) -> bool:
+				return _zip_psp_save(src, _get_save_identity(game).id, dst, MAX_FILE_SIZE),
 		},
 		"vita3k": {
 			"validate": func(tid: String) -> String:
@@ -1112,6 +1113,17 @@ func _compute_local_save_hash(emulator_id: String, game: GameResource, local_sav
 		return {"hash": "", "size": 0}
 	if _is_3ds_tree_path(path):
 		return _compute_3ds_unit_hash(path)
+	var architecture: String = LaunchManager.registry.get_emulator_architecture(emulator_id)
+	if architecture == "dolphin" and game.platform_slug == "ngc" and FSM.dir_exists(path):
+		return _compute_dolphin_gc_hash(game, path)
+	var layout := SaveLayout.policy(architecture, game.platform_slug)
+	if str(layout.get("zip_root_mode", "")) == SaveLayout.ZIP_ROOT_COMPONENTS:
+		var components := _get_save_components(emulator_id, game, path)
+		if not components.is_empty():
+			var total := 0
+			for component in components:
+				total += _folder_content_size(str(component["src"]))
+			return {"hash": _ContentHash.compute_components_zip_hash(components), "size": total}
 	if FSM.dir_exists(path):
 		var root_name = _get_upload_zip_root_name(emulator_id, game, path)
 		return {"hash": _ContentHash.compute_folder_zip_hash(path, root_name), "size": _folder_content_size(path)}
@@ -1119,16 +1131,52 @@ func _compute_local_save_hash(emulator_id: String, game: GameResource, local_sav
 		return {"hash": _ContentHash.compute_content_hash(path), "size": int(FSM.get_file_size(path))}
 	return {"hash": "", "size": 0}
 
-## Root folder name used by the emulator's upload zip. Must mirror the
-## strategy "zip" lambdas so simulated hashes match the uploaded bytes.
+## Root folder name used by the emulator's upload zip. The layout policy is
+## authoritative for both archive construction and RomM hash simulation.
 func _get_upload_zip_root_name(emulator_id: String, game: GameResource, src_path: String) -> String:
-	match LaunchManager.registry.get_emulator_architecture(emulator_id):
-		"cemu":
+	var layout := SaveLayout.policy(LaunchManager.registry.get_emulator_architecture(emulator_id), game.platform_slug)
+	match str(layout.get("zip_root_mode", "")):
+		SaveLayout.ZIP_ROOT_SAVE_ID:
 			return _get_save_identity(game).id
-		"pcsx2", "ppsspp", "vita3k", "rpcs3", "shadps4", "xenia":
+		SaveLayout.ZIP_ROOT_SOURCE_BASENAME:
 			return src_path.rstrip("/").get_file()
 		_:
 			return ""
+
+## Components for multi-root upload/hash layouts. 3DS has its own unit helper;
+## PSP bundles every local save folder matching the title prefix.
+func _get_save_components(emulator_id: String, game: GameResource, local_path: String) -> Array:
+	var architecture: String = LaunchManager.registry.get_emulator_architecture(emulator_id)
+	var is_psp: bool = architecture == "ppsspp" or (architecture == "retroarch" and game.platform_slug == "psp")
+	if not is_psp:
+		return []
+	var title_id := str(_get_save_identity(game).id)
+	var savedata_dir := local_path.rstrip("/").rstrip("\\")
+	if savedata_dir.get_file().to_upper().contains(title_id.to_upper()):
+		savedata_dir = savedata_dir.get_base_dir()
+	var components: Array = []
+	for save in discover_local_psp_save(savedata_dir, title_id):
+		components.append({"src": save.file_path, "root": save.file_path.get_file()})
+	return components
+
+## Native Dolphin GC discovery/upload bundles only this game's GCI files, not
+## every save on the shared card. Reproduce that exact bundle for boundaries.
+func _compute_dolphin_gc_hash(game: GameResource, card_path: String) -> Dictionary:
+	var gc_base := card_path.get_base_dir().get_base_dir()
+	var game_id := _gc_ascii_id(str(_get_save_identity(game).id))
+	var gci_files := _find_gc_gci_files(gc_base, game_id)
+	if gci_files.is_empty():
+		return {"hash": "", "size": 0}
+	var bundle := "user://temp/saves/hash_" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000) + ".zip"
+	if not _zip_gci_files(gci_files, bundle):
+		return {"hash": "", "size": 0}
+	var result := {
+		"hash": _ContentHash.compute_content_hash(bundle),
+		"size": int(FSM.get_file_size(bundle)),
+	}
+	FSM.delete_file(bundle)
+	_cleanup_temp_dir(bundle)
+	return result
 
 func _folder_content_size(dir_path: String) -> int:
 	var total = 0
@@ -2075,6 +2123,37 @@ func _get_extract_dest(emulator_id: String, save_dir: String, record_path: Strin
 	# Default: extract to the parent directory of the record path
 	return record_path.get_base_dir()
 
+## Resolves the static save-layout policy into concrete paths for one download.
+## This is the single source for archive shape, owned commit root, upload root,
+## post-restore destination, and sync-boundary selection.
+func _get_save_layout(emulator_id: String, save_dir: String, record_path: String, game: GameResource, zip_file_name: String = "") -> Dictionary:
+	var architecture: String = LaunchManager.registry.get_emulator_architecture(emulator_id)
+	var layout := SaveLayout.policy(architecture, game.platform_slug)
+	var extract_dest := _get_extract_dest(emulator_id, save_dir, record_path, game, zip_file_name)
+	var archive_root := zip_file_name.get_basename() if zip_file_name != "" else record_path.get_file()
+	if architecture == "rpcs3":
+		# RPCS3 save folders are TitleID-prefixed, often with game-specific
+		# suffixes. The remote ZIP basename is not the internal directory name.
+		archive_root = game.get_active_title_id()
+		layout["root_prefix"] = true
+	layout["extract_dest"] = extract_dest
+	layout["archive_root"] = archive_root
+	match str(layout["kind"]):
+		SaveLayout.BARE_CONTENTS:
+			layout["commit_root"] = extract_dest
+			layout["boundary_path"] = extract_dest
+		SaveLayout.NAMED_ROOT:
+			layout["commit_root"] = FSM.join_paths(extract_dest, archive_root)
+			layout["boundary_path"] = layout["commit_root"]
+		SaveLayout.MULTI_ROOT:
+			layout["commit_root"] = extract_dest
+			layout["boundary_path"] = record_path
+			layout["archive_root"] = _get_save_identity(game).id
+		_:
+			layout["commit_root"] = record_path
+			layout["boundary_path"] = record_path
+	return layout
+
 ## Determines the save name for upload based on emulator and game
 ## Returns the save name string
 func _get_save_name_for_upload(emulator_id: String, game: GameResource, local_file_path: String = "") -> String:
@@ -2090,13 +2169,17 @@ func _get_save_name_for_upload(emulator_id: String, game: GameResource, local_fi
 ## (seen with an exists-but-empty eden profile dir). Applies to every
 ## strategy and the default path.
 func _zip_emulator_save(emulator_id: String, source_path: String, zip_path: String, game: GameResource) -> bool:
+	var architecture: String = LaunchManager.registry.get_emulator_architecture(emulator_id)
+	var needs_custom_packing: bool = architecture in ["azahar", "ppsspp"] or (architecture == "retroarch" and game.platform_slug in ["psp", "3ds"])
 	var zip_ok := false
-	var strategy = _get_strategy(emulator_id, "zip")
-	if strategy.is_valid():
-		zip_ok = strategy.call(source_path, zip_path, game)
+	if needs_custom_packing:
+		var strategy = _get_strategy(emulator_id, "zip")
+		if strategy.is_valid():
+			zip_ok = strategy.call(source_path, zip_path, game)
 	else:
-		# Default: zip the directory without a root folder
-		zip_ok = FSM.zip_directory(source_path, zip_path)
+		var root_name := _get_upload_zip_root_name(emulator_id, game, source_path)
+		var max_size := MAX_FILE_SIZE if architecture == "ppsspp" else -1
+		zip_ok = FSM.zip_directory(source_path, zip_path, max_size, root_name)
 	if zip_ok and not _zip_has_entries(zip_path):
 		push_error("[GameSaveSubManager] Refusing empty save zip (no entries): %s (source: %s)" % [zip_path, source_path])
 		FSM.delete_file(zip_path)
@@ -2809,14 +2892,7 @@ func _run_sync(game: GameResource, emulator_id: String, local_saves: Array, remo
 ## Records the gavel bookkeeping after a successful boundary only.
 ## remote_hash is stored verbatim (the server-stamped content_hash).
 func _record_sync_boundary(game: GameResource, emulator_id: String, file_name: String, record_path: String, timestamp: String, remote_id: int, remote_hash: String) -> void:
-	var hash_info := {"hash": "", "size": 0}
-	if _is_3ds_tree_path(record_path):
-		hash_info = _compute_3ds_unit_hash(record_path)
-	elif FSM.dir_exists(record_path):
-		var root_name = _get_upload_zip_root_name(emulator_id, game, record_path)
-		hash_info = {"hash": _ContentHash.compute_folder_zip_hash(record_path, root_name), "size": _folder_content_size(record_path)}
-	elif FSM.file_exists(record_path):
-		hash_info = {"hash": _ContentHash.compute_content_hash(record_path), "size": int(FSM.get_file_size(record_path))}
+	var hash_info := _compute_local_save_hash(emulator_id, game, {"file_path": record_path})
 	DataManager.update_save_sync_record(game.romm_id, emulator_id, file_name, record_path, timestamp, remote_id, SLOT_DEFAULT, hash_info.hash, remote_hash, hash_info.size)
 
 ## Executes one upload operation. Automatic uploads always POST with
@@ -2942,6 +3018,46 @@ func _handle_upload_409(game: GameResource, emulator_id: String, upload: Diction
 				on_done.call(false)
 	)
 
+## Extracts and restores one downloaded archive according to its layout
+## descriptor. Source ZIPs are deleted only after commit + validation succeeds.
+func _restore_downloaded_save(zip_path: String, layout: Dictionary, on_complete: Callable) -> void:
+	var commit_root := str(layout.get("commit_root", ""))
+	var staging_dir := GameExtraction.staging_path(commit_root)
+	if not FSM.make_dir_recursive(staging_dir):
+		on_complete.call(false)
+		return
+	FSM.extract_archive_async(zip_path, staging_dir, "Save data", false,
+		func(_info: Dictionary): pass,
+		func(extract_success: bool, error_msg: String):
+			if not extract_success:
+				push_error("[GameSaveSubManager] Save extraction failed: " + error_msg)
+				_cleanup_save_staging(staging_dir)
+				on_complete.call(false)
+				return
+			var restored := _restore_staged_save(staging_dir, layout)
+			if not restored.get("success", false):
+				push_error("[GameSaveSubManager] Save restore failed: " + str(restored.get("error", "unknown error")))
+				_cleanup_save_staging(staging_dir)
+				on_complete.call(false)
+				return
+			if FSM.file_exists(zip_path):
+				FSM.delete_file(zip_path)
+			_cleanup_temp_dir(zip_path)
+			_cleanup_save_staging(staging_dir)
+			on_complete.call(true)
+	)
+
+func _restore_staged_save(staging_dir: String, layout: Dictionary) -> Dictionary:
+	return SaveLayout.restore_staged_save(staging_dir, layout, FSM)
+
+func _cleanup_save_staging(staging_dir: String) -> void:
+	if staging_dir == "" or not GameExtraction.is_staging_path(staging_dir) or not FSM.dir_exists(staging_dir):
+		return
+	if FSM.extraction_tree_has_symlinks(staging_dir):
+		push_warning("[GameSaveSubManager] Leaving unsafe save staging in place: " + staging_dir)
+		return
+	FSM.delete_dir_recursive(staging_dir)
+
 ## Executes one download operation: fetch, confirm, extract (folder saves and
 ## zip-packaged file saves), and record the gavel bookkeeping boundary.
 func _execute_save_download(game: GameResource, emulator_id: String, remote: Dictionary, local, device_id: String, current_timestamp: String, on_done: Callable) -> void:
@@ -2971,7 +3087,7 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 			record_path = FSM.join_paths(save_dir, file_name)
 
 	if is_folder_save:
-		zip_path = "user://temp/saves/download_" + str(Time.get_ticks_msec()) + ".zip"
+		zip_path = "user://temp/saves/download_" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000) + ".zip"
 		FSM.make_dir_recursive(zip_path.get_base_dir())
 		local_path = zip_path
 
@@ -3026,7 +3142,8 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 	if download_dest == "":
 		download_dest = local_path
 
-	boundary_path.path = record_path
+	var restore_layout := _get_save_layout(emulator_id, save_dir, record_path, game, file_name)
+	boundary_path.path = str(restore_layout.get("boundary_path", record_path))
 	print("[GameSaveSubManager] Downloading remote save '" + file_name + "' (id " + str(save_id) + ") -> '" + local_path + "' (record path: '" + record_path + "')")
 
 	SystemManager.network.download_save(save_id, device_id, download_dest, func(_success: bool, _status_code: int, error_msg: String):
@@ -3052,6 +3169,7 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 				if not extract_success:
 					on_done.call(false)
 					return
+				boundary_path.path = str(restore_layout.get("boundary_path", boundary_path.path))
 				if LaunchManager.registry.get_emulator_architecture(emulator_id) == "pcsx2":
 					ensure_pcsx2_superblock(save_dir)
 				_record_sync_boundary(game, emulator_id, file_name, boundary_path.path, current_timestamp, save_id, remote.get("content_hash", ""))
@@ -3070,34 +3188,15 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 				if unpacked != null:
 					if not unpacked:
 						push_error("[GameSaveSubManager] Failed to unpack downloaded zip: " + zip_path)
+					elif FSM.file_exists(zip_path):
+						FSM.delete_file(zip_path)
 					_cleanup_temp_dir(zip_path)
 					post_extraction.call(unpacked)
 					return
-				var extract_dest = _get_extract_dest(emulator_id, save_dir, record_path, game, file_name)
-				# Some strategies resolve record_path to a parent dir (pcsx2's
-				# resolve_path returns the memcard root); when the extract dest
-				# is a child of record_path, the save actually lands there and
-				# the boundary must hash that folder, not the parent.
-				if record_path != "" and extract_dest != "" and extract_dest.get_base_dir().rstrip("/") == record_path.rstrip("/"):
-					boundary_path.path = extract_dest
-				FSM.extract_archive_async(zip_path, extract_dest, "Save data", true,
-					func(_info: Dictionary): pass,
-					func(extract_success: bool, _error):
-						if not extract_success:
-							push_error("[GameSaveSubManager] Failed to extract downloaded zip: " + zip_path)
-						_cleanup_temp_dir(zip_path)
-						post_extraction.call(extract_success)
-				)
+				_restore_downloaded_save(zip_path, restore_layout, post_extraction)
 			elif local_path.to_lower().ends_with(".zip"):
-				# Non-folder save downloaded as zip (e.g. GameCube .gci bundle)
-				var extract_dest = _get_extract_dest(emulator_id, save_dir, record_path, game, file_name)
-				FSM.extract_archive_async(local_path, extract_dest, "Save data", true,
-					func(_info: Dictionary): pass,
-					func(extract_success: bool, _error):
-						if not extract_success:
-							push_error("[GameSaveSubManager] Failed to extract downloaded zip: " + local_path)
-						post_extraction.call(extract_success)
-				)
+				# Non-folder save downloaded as zip (e.g. GameCube .gci bundle).
+				_restore_downloaded_save(local_path, restore_layout, post_extraction)
 			else:
 				post_extraction.call(true)
 		)

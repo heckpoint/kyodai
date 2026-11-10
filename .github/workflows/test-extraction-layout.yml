@@ -1,0 +1,55 @@
+name: Test Extraction Layout
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'utils/filesystem/**'
+      - 'managers/system_manager/filesystem_sub_manager.gd'
+      - 'managers/launch_manager/firmware_sub_manager.gd'
+      - 'managers/launch_manager/emulator_sub_manager.gd'
+      - 'managers/launch_manager/game_sub_manager.gd'
+      - 'managers/data_manager/game_save_sub_manager.gd'
+      - 'utils/identity/title_id_parser.gd'
+      - 'data/emulators/*.json'
+      - '.github/workflows/test-extraction-layout.yml'
+  pull_request:
+    paths:
+      - 'utils/filesystem/**'
+      - 'managers/system_manager/filesystem_sub_manager.gd'
+      - 'managers/launch_manager/firmware_sub_manager.gd'
+      - 'managers/launch_manager/emulator_sub_manager.gd'
+      - 'managers/launch_manager/game_sub_manager.gd'
+      - 'managers/data_manager/game_save_sub_manager.gd'
+      - 'utils/identity/title_id_parser.gd'
+      - 'data/emulators/*.json'
+      - '.github/workflows/test-extraction-layout.yml'
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: 4.7
+
+jobs:
+  extraction-layout:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache Godot editor
+      id: cache-godot
+      uses: actions/cache@v4
+      with:
+        path: godot
+        key: godot-editor-v${{ env.GODOT_VERSION }}-stable-linux
+
+    - name: Download Godot
+      if: steps.cache-godot.outputs.cache-hit != 'true'
+      run: |
+        curl -L -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+        unzip godot.zip -d godot
+        chmod +x godot/*
+
+    - name: Run extraction layout tests
+      env:
+        GODOT_BIN: ${{ github.workspace }}/godot/Godot_v${{ env.GODOT_VERSION }}-stable_linux.x86_64
+      run: utils/filesystem/run_extraction_layout_tests.sh

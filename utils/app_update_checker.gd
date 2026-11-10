@@ -9,10 +9,10 @@ class_name AppUpdateChecker
 ## running build's version and, when a newer one exists, shows a dialog.
 ##
 ## Install behavior is platform-specific:
-## - Android: "Download & Install" downloads the APK in-app and hands it to
-##   the system package installer via KyodaiBridge.installApk (the same
-##   plumbing emulator installs use). The system owns the confirm/replace/
-##   relaunch; app data survives because all releases share one signature.
+## - Android: "Download & Install" downloads the APK in-app. Rooted builds
+##   replace it through the privileged backend and relaunch automatically;
+##   other devices use the system package installer. App data survives because
+##   all releases share one signature.
 ## - Desktop: "Download" opens the release page in the browser (file-swap
 ##   self-install is future work).
 ## Dev builds (custom feature "dev", e.g. the Android Dev preset) skip the
@@ -190,10 +190,9 @@ static func _download_update(tag: String, download_url: String, size: int) -> vo
 			_notify("Update download failed: " + message, SystemManager.notifications.Type.ERROR)
 	SystemManager.download.download_completed.connect(on_completed)
 
-## Hands the downloaded APK to the system package installer. Mirrors the
-## emulator-install flow in emulator_sub_manager: permission gate first,
-## then the FileProvider-backed install intent. After the user confirms,
-## Android replaces the app and relaunches it - nothing left for us to do.
+## Hands the downloaded APK to the self-update installer. Rooted builds detach
+## the replace and relaunch automatically; other devices use the system
+## package-installer intent. The permission gate is skipped when root is usable.
 static func _install_apk(apk_path: String) -> void:
 	if not Engine.has_singleton("KyodaiBridge"):
 		push_error("[AppUpdateChecker] KyodaiBridge plugin unavailable; falling back to browser")
@@ -208,7 +207,9 @@ static func _install_apk(apk_path: String) -> void:
 		return
 
 	var absolute_path: String = FSM.resolve_path(apk_path, {"format": FSM.PathFormat.ABSOLUTE})
-	var success = plugin.call("installApk", absolute_path)
+	var success = plugin.call("installApkSelfUpdate", absolute_path)
+	if success == null:
+		success = plugin.call("installApk", absolute_path)
 	if success:
 		SystemManager.platform.notify_install_started()
 	else:

@@ -4,6 +4,7 @@ class_name TitleIDParser
 
 const DEBUG_LOG: bool = false
 const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
+const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
 
 # Sigil CLI runner for platforms routed through argosy-sigil
 const _SigilRunner = preload("res://utils/identity/sigil_runner.gd")
@@ -762,17 +763,15 @@ static func extract_ps4_title_id(zip_path: String) -> String:
 		reader.close()
 		return ""
 	
-	# Find the root-level CUSA directory
+	# Find the shallowest CUSA directory, tolerating outer archive wrappers.
 	var title_id := ""
+	var best_depth := 999
 	for file_path in files:
-		# Look for paths like "CUSAxxxxx/..." at the root level
-		var parts = file_path.split("/", false)
-		if parts.size() > 0:
-			var potential_id = parts[0]
-			if potential_id.begins_with("CUSA") and potential_id.length() == 9:
-				title_id = potential_id
-				if DEBUG_LOG: print("[TitleIDParser] Found PS4 TitleID in ZIP: " + title_id + " (from path: " + file_path + ")")
-				break
+		var candidate := GameExtraction.ps4_title_id_candidate(file_path)
+		if not candidate.is_empty() and int(candidate.get("depth", 999)) < best_depth:
+			best_depth = int(candidate["depth"])
+			title_id = str(candidate["title_id"])
+			if DEBUG_LOG: print("[TitleIDParser] Found PS4 TitleID in ZIP: " + title_id + " (from path: " + file_path + ")")
 	
 	reader.close()
 	
@@ -846,22 +845,18 @@ static func _extract_ps4_title_id_with_7z(zip_path: String) -> String:
 	if output.size() > 0:
 		output_str = output[0]
 	
-	# Parse output to find root-level CUSA directory
+	# Parse output to find the shallowest CUSA directory, including wrappers.
 	var title_id = ""
+	var best_depth := 999
 	var lines = output_str.split("\n")
 	for line in lines:
 		if line.begins_with("Path = "):
 			var path = line.substr(7).strip_edges()
-			# Normalize path separators (Windows uses backslashes)
-			path = path.replace("\\", "/")
-			# Check if this is a root-level CUSA directory
-			var parts = path.split("/", false)
-			if parts.size() > 0:
-				var potential_id = parts[0]
-				if potential_id.begins_with("CUSA") and potential_id.length() == 9:
-					title_id = potential_id
-					if DEBUG_LOG: print("[TitleIDParser] Found PS4 TitleID in 7-Zip output: " + title_id + " (from path: " + path + ")")
-					break
+			var candidate := GameExtraction.ps4_title_id_candidate(path)
+			if not candidate.is_empty() and int(candidate.get("depth", 999)) < best_depth:
+				best_depth = int(candidate["depth"])
+				title_id = str(candidate["title_id"])
+				if DEBUG_LOG: print("[TitleIDParser] Found PS4 TitleID in 7-Zip output: " + title_id + " (from path: " + path + ")")
 	
 	if title_id == "":
 		push_error("[TitleIDParser] No CUSA TitleID found via 7-Zip listing")
@@ -902,12 +897,17 @@ static func extract_ps3_title_id(zip_path: String) -> String:
 		reader.close()
 		return ""
 	
-	# Find PARAM.SFO in the ZIP (could be PS3_GAME/PARAM.SFO or TITLEID/PARAM.SFO)
+	# Prefer the authoritative disc marker before considering digital/loose SFOs.
 	var sfo_path := ""
 	for file_path in files:
-		if file_path.ends_with("PARAM.SFO") or file_path.ends_with("PARAM.sfo"):
+		if GameExtraction.is_ps3_disc_sfo_path(file_path):
 			sfo_path = file_path
 			break
+	if sfo_path == "":
+		for file_path in files:
+			if file_path.ends_with("PARAM.SFO") or file_path.ends_with("PARAM.sfo"):
+				sfo_path = file_path
+				break
 	
 	if sfo_path == "":
 		push_error("[TitleIDParser] PARAM.SFO not found in PS3 ZIP: " + zip_path)
@@ -958,15 +958,21 @@ static func _extract_ps3_title_id_with_7z(zip_path: String) -> String:
 	if output.size() > 0:
 		output_str = output[0]
 	
-	# Parse output to find PARAM.SFO path
+	# Parse output, preferring the same authoritative disc marker used on disk.
 	var sfo_path = ""
 	var lines = output_str.split("\n")
 	for line in lines:
-		if line.find("PARAM.SFO") != -1 and not line.ends_with("/") and not line.ends_with("\\"):
-			# Extract path from "Path = ..." line
-			if line.begins_with("Path = "):
-				sfo_path = line.substr(7).strip_edges()
+		if line.begins_with("Path = "):
+			var candidate: String = line.substr(7).strip_edges()
+			if GameExtraction.is_ps3_disc_sfo_path(candidate):
+				sfo_path = candidate
 				break
+	if sfo_path == "":
+		for line in lines:
+			if line.find("PARAM.SFO") != -1 and not line.ends_with("/") and not line.ends_with("\\"):
+				if line.begins_with("Path = "):
+					sfo_path = line.substr(7).strip_edges()
+					break
 	
 	if sfo_path == "":
 		push_error("[TitleIDParser] PARAM.SFO not found via 7-Zip listing")

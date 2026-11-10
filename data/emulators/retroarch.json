@@ -219,7 +219,8 @@
 					"action_type": "extract",
 					"extract_to": ".",
 					"strip_top_directory": true,
-					"flatten_target": "RetroArch-Linux-x86_64"
+					"flatten_target": "RetroArch-Linux-x86_64",
+					"payload_anchor": "*.AppImage"
 				},
 				"android": {
 					"action_type": "apk_install",

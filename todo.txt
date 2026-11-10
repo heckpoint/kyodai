@@ -3,24 +3,12 @@
 xemu raw hdd save sync
 ship w music
 Docs: there is no docs/ folder and no AGENTS.md; todo.txt
-- universal extraction normalizer (walk down for expected files...saves & games)
-maybe make cores on demand
-oobe GUI sorta broken
 flex-grid sizes and card widgets (random, etc..)
 guides, hl2b, playtime in gui
 
 ## romm:
 	-romm extract rom metadata & icons
 	-netplay (emufii model)
-	- PR 1 — feat(sockets): client-token auth for netplay and activity namespaces
-	- https://github.com/rommapp/romm/pull/5486
-
-	- PR 2 — feat(netplay): external-emulator signaling (UDP candidates + punch coordination)
-	The actual matchmaking, ~300–500 lines + tests.
-	handler/netplay_handler.py — extend NetplayRoom with NotRequired fields: client, emulator_id, core_id, rom_hash_prefix, protocol_version. Rooms live in Redis as JSON, so no DB migration — big selling point, zero ops burden.
-	endpoints/sockets/netplay.py — three room-scoped events (candidates, punch, handshake-result), guarded by the existing _is_room_peer check so the server only relays between verified room members. Server stays a dumb relay: no game traffic, no TURN.
-	endpoints/netplay.py — expose the new metadata in /api/netplay/list; optionally the server-wide joinable-sessions endpoint (mirrors the streaming API's precedent).
-	EmulatorJS path completely untouched — the frontend doesn't change.
 
 ## configs
 	- user/identity profile resolver for emulator installs and saves
@@ -47,10 +35,9 @@ guides, hl2b, playtime in gui
 		- scroll truncation if focused
 		- only game title for focused option (speech bubble?)
 	m3 master color sync with game/platform?
-	draggable ui elements? (split containers?)
+	panels/layouts/draggable ui elements? (split containers?)
 	color presets (platform/game/custom)
 	'controls/info bar'
-	add letters to library navigation?
 	badge effect placement opts
 
 rework hero to also accept effect stacks

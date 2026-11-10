@@ -103,6 +103,7 @@ func _build_welcome_page() -> VBoxContainer:
 	desc.text = "Let's get your emulator launcher set up.\n\nWe'll configure storage paths, permissions, and your RomM connection."
 	desc.label_style = M3Label.Style.BODY_LARGE
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(desc)
 
 	return vbox
@@ -114,6 +115,7 @@ func _build_storage_paths_page() -> VBoxContainer:
 	var desc = M3Label.new()
 	desc.text = "Choose where Kyodai will store your games and emulators."
 	desc.label_style = M3Label.Style.BODY_MEDIUM
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(desc)
 
 	var sep = HSeparator.new()
@@ -132,6 +134,7 @@ func _build_storage_paths_page() -> VBoxContainer:
 		_storage_warning_label = M3Label.new()
 		_storage_warning_label.text = "Please select both folders to continue"
 		_storage_warning_label.label_style = M3Label.Style.BODY_SMALL
+		_storage_warning_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		_storage_warning_label.visible = false
 		vbox.add_child(_storage_warning_label)
 
@@ -149,6 +152,7 @@ func _build_android_permissions_page() -> VBoxContainer:
 		var label = M3Label.new()
 		label.text = "Permission setup is only needed on Android."
 		label.label_style = M3Label.Style.BODY_LARGE
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		label.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		vbox.add_child(label)
@@ -157,6 +161,7 @@ func _build_android_permissions_page() -> VBoxContainer:
 	var desc = M3Label.new()
 	desc.text = "Kyodai needs the following permissions to function properly."
 	desc.label_style = M3Label.Style.BODY_MEDIUM
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(desc)
 
 	vbox.add_child(HSeparator.new())
@@ -211,6 +216,7 @@ func _build_done_page() -> VBoxContainer:
 	var title = M3Label.new()
 	title.text = "All Set!"
 	title.label_style = M3Label.Style.HEADLINE_MEDIUM
+	title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	vbox.add_child(title)
 
@@ -222,6 +228,7 @@ func _build_done_page() -> VBoxContainer:
 	desc.text = "Kyodai is ready to go.\n\nYou can change any of these settings later in the Settings tab."
 	desc.label_style = M3Label.Style.BODY_LARGE
 	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	vbox.add_child(desc)
 
 	return vbox
@@ -230,6 +237,7 @@ func _add_path_row(parent: VBoxContainer, label_text: String, default_value: Str
 	var label = M3Label.new()
 	label.text = label_text
 	label.label_style = M3Label.Style.BODY_MEDIUM
+	label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	parent.add_child(label)
 
 	var container = HBoxContainer.new()
@@ -260,11 +268,13 @@ func _add_permission_row(parent: VBoxContainer, title: String, description: Stri
 	# Title row with optional button and indicator
 	var title_row = HBoxContainer.new()
 	title_row.custom_minimum_size = Vector2(0, M3Units.dp(36))
+	title_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	container.add_child(title_row)
 
 	var title_label = M3Label.new()
 	title_label.text = title
 	title_label.label_style = M3Label.Style.TITLE_MEDIUM
+	title_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	title_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_row.add_child(title_label)
 
@@ -280,6 +290,8 @@ func _add_permission_row(parent: VBoxContainer, title: String, description: Stri
 	var desc_label = M3Label.new()
 	desc_label.text = description
 	desc_label.label_style = M3Label.Style.BODY_SMALL
+	desc_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	container.add_child(desc_label)
 
 	return {"container": container, "indicator": indicator}

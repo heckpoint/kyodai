@@ -1,0 +1,10 @@
+--- src/main/java/com/godot/game/GodotApp.java
++++ src/main/java/com/godot/game/GodotApp.java
+@@ -115,6 +115,7 @@
+ 	@Override
+ 	public void onResume() {
+ 		super.onResume();
++		KyodaiBridgePlugin.setCurrentActivity(this); // kyodai_activity_tracking
+ 		updateWindowAppearance.run();
+ 	}
+ 

@@ -94,9 +94,26 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     private volatile String observerNonce = "";
     private volatile String observerStartRequestId = "";
     private static KyodaiBridgePlugin instance;
+    private static java.lang.ref.WeakReference<Activity> foregroundActivity;
 
     public static KyodaiBridgePlugin getInstance() {
         return instance;
+    }
+
+    /** Called by GodotApp whenever any Kyodai activity resumes. */
+    public static void setCurrentActivity(Activity activity) {
+        foregroundActivity = new java.lang.ref.WeakReference<>(activity);
+    }
+
+    private Activity currentActivity() {
+        Activity current = foregroundActivity != null ? foregroundActivity.get() : null;
+        return current != null ? current : activity;
+    }
+
+    private void startActivity(Intent intent) {
+        Activity current = currentActivity();
+        if (current == null) throw new IllegalStateException("No foreground activity");
+        current.startActivity(intent);
     }
 
     public KyodaiBridgePlugin(Godot godot) {
@@ -105,6 +122,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         instance = this;
         Log.d(TAG, "KyodaiBridgePlugin constructor called");
         this.activity = godot.getActivity();
+        setCurrentActivity(this.activity);
         Log.d(TAG, "Activity obtained: " + (activity != null ? "YES" : "NO"));
         if (this.activity != null) {
             this.windowFocusGuard = new WindowFocusGuard(activity);
@@ -459,7 +477,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             Log.d(TAG, "Intent action: " + intent.getAction());
             Log.d(TAG, "Intent component: " + intent.getComponent());
 
-            activity.startActivity(intent);
+            startActivity(intent);
 
             Log.d(TAG, "SUCCESS: Steam game launch intent sent");
             Log.d(TAG, "==========================================");
@@ -896,7 +914,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
                 Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
                 intent.setData(Uri.parse("package:" + activity.getPackageName()));
                 intent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
-                activity.startActivity(intent);
+                startActivity(intent);
                 Log.d(TAG, "Launched system settings for MANAGE_EXTERNAL_STORAGE");
             } else {
                 // On older versions, request WRITE_EXTERNAL_STORAGE normally
@@ -936,6 +954,12 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         return true;
     }
 
+    /** True when either root or Android's normal unknown-apps grant can install. */
+    @UsedByGodot
+    public boolean canInstallPackages() {
+        return activity != null && (RootShell.isAvailable(activity) || canInstallUnknownApps());
+    }
+
     /**
      * Opens the dedicated "Install unknown apps" settings screen for this app
      * (ACTION_MANAGE_UNKNOWN_APP_SOURCES). Falls back to the app details page
@@ -969,7 +993,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
             intent.setData(packageUri);
             intent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
-            activity.startActivity(intent);
+            startActivity(intent);
             Log.d(TAG, "Launched manage unknown app sources settings");
             Log.d(TAG, "==========================================");
             return true;
@@ -981,7 +1005,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             Intent intent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
             intent.setData(packageUri);
             intent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
-            activity.startActivity(intent);
+            startActivity(intent);
             Log.d(TAG, "Launched application details settings for install unknown apps");
             Log.d(TAG, "==========================================");
             return true;
@@ -1083,7 +1107,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         try {
             Intent intent = new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
             intent.setData(Uri.parse("package:" + activity.getPackageName()));
-            activity.startActivity(intent);
+            startActivity(intent);
             Log.d(TAG, "Launched ignore battery optimizations dialog");
             Log.d(TAG, "==========================================");
             return true;
@@ -3489,7 +3513,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             }
             
             // Launch the intent
-            activity.startActivity(intent);
+            startActivity(intent);
             
             Log.d(TAG, "SUCCESS: Intent launched");
             Log.d(TAG, "==========================================");
@@ -3526,7 +3550,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             }
             
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            activity.startActivity(intent);
+            startActivity(intent);
             
             Log.d(TAG, "SUCCESS: App launched");
             Log.d(TAG, "==========================================");
@@ -3700,7 +3724,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             // (no shadowing our task). See requestInstallUnknownAppsPermission.
             Intent intent = new Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS);
             intent.addFlags(Intent.FLAG_ACTIVITY_NO_HISTORY);
-            activity.startActivity(intent);
+            startActivity(intent);
         } catch (Exception e) {
             Log.e(TAG, "openUsageAccessSettings failed: " + e.getMessage());
         }
@@ -4181,8 +4205,50 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     }
 
     /**
-     * Installs an APK file using PackageInstaller with FileProvider content URI.
-     * Required for Android N+ where file:// URIs are forbidden.
+     * Self-update variant. The settings-root transport must be restored before
+     * PackageManager kills Kyodai, otherwise its injected command is replayed
+     * on the next launch. Detach a delayed install and relaunch on success.
+     */
+    @UsedByGodot
+    public boolean installApkSelfUpdate(String apkPath) {
+        if (activity == null || apkPath == null || apkPath.isEmpty()) return false;
+        if (!RootShell.isAvailable(activity)) return installApk(apkPath);
+        try {
+            File apkFile = new File(apkPath).getCanonicalFile();
+            if (!apkFile.isFile() || !apkFile.getName().toLowerCase().endsWith(".apk")) {
+                Log.e(TAG, "installApkSelfUpdate: Not an APK file: " + apkFile);
+                return false;
+            }
+            File logFile = new File(activity.getCacheDir(), "self-update-root.log");
+            File rcFile = new File(activity.getCacheDir(), "self-update-root.rc");
+            logFile.delete();
+            rcFile.delete();
+            String quotedLog = RootShell.quote(logFile.getAbsolutePath());
+            String quotedRc = RootShell.quote(rcFile.getAbsolutePath());
+            String launch = activity.getPackageName() + "/com.godot.game.GodotAppLauncher";
+            String script = "(sleep 2; pm install -r " + RootShell.quote(apkFile.getAbsolutePath())
+                    + "; rc=$?; if [ $rc -eq 0 ]; then am start -n " + RootShell.quote(launch) + "; fi; "
+                    + "echo $rc > " + quotedRc + "; chmod 644 " + quotedLog + " " + quotedRc + ") > "
+                    + quotedLog + " 2>&1 </dev/null & echo Scheduled";
+            RootShell.Result result = RootShell.run(activity, script);
+            boolean scheduled = result != null && result.succeeded()
+                    && result.output != null && result.output.contains("Scheduled");
+            if (!scheduled) {
+                Log.e(TAG, "installApkSelfUpdate: Could not schedule root install: exit="
+                        + (result == null ? "null" : result.exitCode)
+                        + " output=" + (result == null ? "null" : result.output));
+            }
+            return scheduled;
+        } catch (Exception e) {
+            Log.e(TAG, "installApkSelfUpdate: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Installs an APK through the privileged route when available, otherwise
+     * uses PackageInstaller with a FileProvider content URI. Root installs do
+     * not require Android's "Install unknown apps" grant and preserve app data.
      */
     @UsedByGodot
     public boolean installApk(String apkPath) {
@@ -4190,50 +4256,55 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             Log.e(TAG, "installApk: Empty path");
             return false;
         }
-        
+
         if (activity == null) {
             Log.e(TAG, "installApk: Activity is null");
             return false;
         }
-        
+
         try {
-            // Android 8+: without the runtime "Install unknown apps" grant the
-            // installer intent is refused by the system. Bail out explicitly so
-            // the caller can route the user to the settings screen instead of
-            // reporting a phantom success.
+            File apkFile = new File(apkPath).getCanonicalFile();
+            if (!apkFile.isFile() || !apkFile.getName().toLowerCase().endsWith(".apk")) {
+                Log.e(TAG, "installApk: Not an APK file: " + apkFile);
+                return false;
+            }
+
+            if (RootShell.isAvailable(activity)) {
+                RootShell.Result result = RootShell.run(activity,
+                        "pm install -r " + RootShell.quote(apkFile.getAbsolutePath()));
+                if (result != null && result.succeeded() && result.output != null
+                        && result.output.contains("Success")) {
+                    Log.d(TAG, "installApk: Root install succeeded");
+                    return true;
+                }
+                Log.e(TAG, "installApk: Root install failed: exit="
+                        + (result == null ? "null" : result.exitCode)
+                        + " output=" + (result == null ? "null" : result.output));
+                return false;
+            }
+
+            // Unrooted fallback: Android 8+ requires the runtime grant before
+            // the system installer intent will be accepted.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                     && !activity.getPackageManager().canRequestPackageInstalls()) {
                 Log.e(TAG, "installApk: 'Install unknown apps' not granted for this app");
                 return false;
             }
 
-            File apkFile = new File(apkPath);
-            if (!apkFile.exists()) {
-                Log.e(TAG, "installApk: File does not exist: " + apkPath);
-                return false;
-            }
-            
-            // Create content:// URI via FileProvider
             Uri apkUri = FileProvider.getUriForFile(activity,
                 activity.getPackageName() + ".kyodai.fileprovider", apkFile);
-            
             Log.d(TAG, "installApk: Using URI: " + apkUri);
-            
-            // Create install intent
+
             Intent intent = new Intent(Intent.ACTION_VIEW);
             intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            
-            // Grant permission to package installer
-            activity.grantUriPermission("com.android.packageinstaller", apkUri, 
+            activity.grantUriPermission("com.android.packageinstaller", apkUri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            
-            activity.startActivity(intent);
-            
+
+            startActivity(intent);
             Log.d(TAG, "installApk: Install intent launched successfully");
             return true;
-            
         } catch (Exception e) {
             Log.e(TAG, "installApk: Failed to install APK: " + e.getMessage());
             e.printStackTrace();

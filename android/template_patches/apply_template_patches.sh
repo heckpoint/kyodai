@@ -23,6 +23,9 @@
 # 4. Home-intent forwarding - GodotPlugin has no onNewIntent hook, so retained
 #    sessions receive Home through the existing GodotApp activity. No subclass,
 #    duplicate activity, or launcher-alias override is involved.
+# 5. Foreground activity tracking - settings and external intents must launch
+#    from the currently resumed Kyodai activity, not the first activity created
+#    in the process, or returning can resume a stale task with a black surface.
 #
 # Idempotent: safe to re-run against an already-patched zip.
 #
@@ -63,6 +66,13 @@ else
   patch -p0 < "$PATCH_DIR/godotapp_home_forwarding.patch"
 fi
 
+# 5. Track the currently resumed Kyodai activity for external intents.
+if grep -q kyodai_activity_tracking src/main/java/com/godot/game/GodotApp.java; then
+  echo "Foreground activity tracking already present, skipping patch"
+else
+  patch -p0 < "$PATCH_DIR/godotapp_activity_tracking.patch"
+fi
+
 # Update the two entries in place (python3 zipfile: available on CI runners and
 # dev machines alike; the zip(1) CLI is not).
 python3 - "$TPL" <<'PYEOF'
@@ -88,4 +98,5 @@ unzip -p "$TPL" src/main/AndroidManifest.xml | grep -q 'fontWeightAdjustment'
 unzip -p "$TPL" src/main/java/com/godot/game/GodotApp.java | grep -q 'return false;'
 unzip -p "$TPL" src/main/java/com/godot/game/GodotApp.java | grep -q 'kyodai_recreate_guard'
 unzip -p "$TPL" src/main/java/com/godot/game/GodotApp.java | grep -q 'kyodai_home_forwarding'
+unzip -p "$TPL" src/main/java/com/godot/game/GodotApp.java | grep -q 'kyodai_activity_tracking'
 echo "Template patches applied and verified: $TPL"
