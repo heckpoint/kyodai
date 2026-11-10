@@ -1,6 +1,7 @@
 package com.heckpoint.kyodai;
 
 import android.content.Context;
+import android.provider.Settings;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.util.Log;
@@ -15,6 +16,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.UUID;
 
 /**
@@ -48,6 +50,8 @@ public final class RootShell {
     private static final String SCRIPT_NAME = "root-op.sh";
     private static final String WRAPPER_NAME = "root-run.sh";
     private static final String OUTPUT_NAME = "run-output.txt";
+    private static final String RC_NAME = "run-rc.txt";
+    private static final AtomicInteger SETTINGS_WRAPPER_ID = new AtomicInteger(1);
 
     private RootShell() {}
 
@@ -55,16 +59,23 @@ public final class RootShell {
         return PServer.isAvailable() || Xsu.isAvailable();
     }
 
+    public static boolean isAvailable(Context context) {
+        return PServer.isAvailable() || Xsu.isAvailable() || SettingsRoot.isAvailable(context);
+    }
+
     /** Single-string quoting for shell script bodies. */
     public static String quote(String value) {
         return "'" + value.replace("'", "'\\''") + "'";
     }
 
-    private static String execute(String command) throws Exception {
+    private static String execute(Context context, File wrapper, File rcFile) throws Exception {
         if (PServer.isAvailable()) {
-            return PServer.execute(command);
+            return PServer.execute("sh " + wrapper.getAbsolutePath());
         }
-        return Xsu.execute(command);
+        if (Xsu.isAvailable()) {
+            return Xsu.execute("sh " + wrapper.getAbsolutePath());
+        }
+        return SettingsRoot.execute(context, wrapper, rcFile);
     }
 
     /**
@@ -101,7 +112,9 @@ public final class RootShell {
 
     private static Result runInternal(Context context, String body) {
         File dir = null;
-        if (!isAvailable()) return null;
+        if (!isAvailable(context)) return null;
+        boolean settingsRoute = !PServer.isAvailable() && !Xsu.isAvailable();
+        File wrapper = null;
         try {
             // Unique per invocation: concurrent task/session operations, including
             // calls from different Kyodai processes, never share request files.
@@ -115,17 +128,23 @@ public final class RootShell {
             File output = new File(dir, OUTPUT_NAME);
             output.delete();
 
-            File wrapper = new File(dir, WRAPPER_NAME);
+            // The settings bridge rejects long commands, so its wrapper uses a
+            // short app-private path. Output and exit-code files stay unique.
+            wrapper = settingsRoute
+                    ? new File(context.getCacheDir(), "r" + SETTINGS_WRAPPER_ID.getAndIncrement())
+                    : new File(dir, WRAPPER_NAME);
+            File rcFile = new File(dir, RC_NAME);
             writeText(wrapper,
                     "sh " + script.getAbsolutePath() + " > " + output.getAbsolutePath() + " 2>&1\n" +
                     "rc=$?\n" +
                     "chmod 644 " + output.getAbsolutePath() + "\n" +
-                    "echo $rc\n");
+                    (settingsRoute ? "echo $rc > " + rcFile.getAbsolutePath() + "\n" +
+                            "chmod 644 " + rcFile.getAbsolutePath() + "\n" : "echo $rc\n"));
 
             script.setReadable(true, false);
             wrapper.setReadable(true, false);
 
-            String exitStr = execute("sh " + wrapper.getAbsolutePath());
+            String exitStr = execute(context, wrapper, rcFile);
             Integer exit = null;
             if (exitStr != null) {
                 try {
@@ -138,6 +157,7 @@ public final class RootShell {
             Log.w(TAG, "root shell failed: " + e.getMessage());
             return null;
         } finally {
+            if (settingsRoute && wrapper != null) wrapper.delete();
             deleteRecursively(dir);
         }
     }
@@ -233,6 +253,77 @@ public final class RootShell {
             } finally {
                 data.recycle();
                 reply.recycle();
+            }
+        }
+    }
+
+    /** AYN Android 13: OdinSettings' unescaped display_pwm_value observer. */
+    static final class SettingsRoot {
+        private static final String KEY = "display_pwm_value";
+        private static final Object LOCK = new Object();
+        private static Boolean available;
+
+        static synchronized boolean isAvailable(Context context) {
+            if (available != null) return available;
+            synchronized (LOCK) {
+                if (available != null) return available;
+                if (!Settings.System.canWrite(context)) {
+                    available = false;
+                    Log.i(TAG, "SettingsRoot unavailable: modify-system-settings not granted");
+                    return false;
+                }
+                File dir = new File(context.getCacheDir(), "rp");
+                try {
+                    dir.mkdirs();
+                    File wrapper = new File(dir, "r");
+                    File output = new File(dir, "o");
+                    File rc = new File(dir, "c");
+                    writeText(wrapper,
+                            "id > " + output.getAbsolutePath() + " 2>&1\n" +
+                            "echo $? > " + rc.getAbsolutePath() + "\n" +
+                            "chmod 644 " + output.getAbsolutePath() + " " + rc.getAbsolutePath() + "\n");
+                    String rcText = execute(context, wrapper, rc);
+                    String outputText = readAll(output);
+                    available = "0".equals(rcText) && outputText.contains("uid=0");
+                    if (!available) Log.i(TAG, "SettingsRoot probe did not return root");
+                } catch (Exception e) {
+                    available = false;
+                    Log.i(TAG, "SettingsRoot probe failed: " + e.getMessage());
+                } finally {
+                    deleteRecursively(dir);
+                }
+                return available;
+            }
+        }
+
+        /** Executes the short wrapper and reads its exit-code file. */
+        static String execute(Context context, File wrapper, File rcFile) throws Exception {
+            synchronized (LOCK) {
+                rcFile.delete();
+                String old = Settings.System.getString(context.getContentResolver(), KEY);
+                try {
+                    boolean injected = Settings.System.putString(context.getContentResolver(), KEY,
+                            "\";sh " + wrapper.getAbsolutePath() + ";#");
+                    if (!injected) throw new IllegalStateException("settings injection rejected");
+                    String rc = null;
+                    long deadline = System.currentTimeMillis() + 15000;
+                    while (System.currentTimeMillis() < deadline) {
+                        if (rcFile.isFile()) {
+                            try {
+                                String value = readAll(rcFile).trim();
+                                if (!value.isEmpty()) {
+                                    rc = value;
+                                    break;
+                                }
+                            } catch (Exception ignored) {}
+                        }
+                        Thread.sleep(25);
+                    }
+                    if (rc == null) throw new IllegalStateException("settings root timed out");
+                    return rc;
+                } finally {
+                    Settings.System.putString(context.getContentResolver(), KEY, old);
+                }
             }
         }
     }

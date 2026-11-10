@@ -11,6 +11,9 @@
 	     requestInstallUnknownAppsPermission(). -->
 	<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 	
+	<!-- User-grantable system-settings access, used by the legacy AYN root route. -->
+	<uses-permission android:name="android.permission.WRITE_SETTINGS" />
+
 	<!-- Permission to access all files (for FileProvider to serve external files) -->
 	<uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
 		android:minSdkVersion="30" />

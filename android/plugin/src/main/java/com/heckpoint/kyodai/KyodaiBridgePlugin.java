@@ -92,7 +92,7 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     private String taskEventObserverNonce = "";
     private volatile int observerRequestedTaskId = -1;
     private volatile String observerNonce = "";
-    private volatile boolean observerReleasePending;
+    private volatile String observerStartRequestId = "";
     private static KyodaiBridgePlugin instance;
 
     public static KyodaiBridgePlugin getInstance() {
@@ -3780,14 +3780,19 @@ public class KyodaiBridgePlugin extends GodotPlugin {
 
     @UsedByGodot
     public void androidTaskSetRetainedIdentity(int taskId, String packageName, String topActivity, boolean gameForeground) {
+        if (retainedTaskId != taskId) {
+            // A bootstrap activity may hand the game to a new Android task.
+            // Retire the old observer before binding the replacement identity.
+            androidTaskReleaseObserver();
+            clearHomeSnapshot();
+        }
         retainedTaskId = taskId;
         retainedPackage = packageName != null ? packageName : "";
         retainedTopActivity = topActivity != null ? topActivity : "";
         earlyHomeEnabled = gameForeground;
         if (gameForeground && taskBackend != null && observerRequestedTaskId != taskId) {
             observerRequestedTaskId = taskId;
-            observerReleasePending = false;
-            taskBackend.startObserver(taskId, retainedPackage, retainedTopActivity,
+            observerStartRequestId = taskBackend.startObserver(taskId, retainedPackage, retainedTopActivity,
                     activity.getPackageName(), android.os.Process.myPid());
         }
     }
@@ -3806,14 +3811,10 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     public void androidTaskReleaseObserver() {
         stopObserverEvents();
         observerRequestedTaskId = -1;
+        observerStartRequestId = "";
         String nonce = observerNonce;
         observerNonce = "";
-        if (!nonce.isEmpty()) {
-            writeObserverRelease(nonce);
-            observerReleasePending = false;
-        } else {
-            observerReleasePending = true;
-        }
+        if (!nonce.isEmpty()) writeObserverRelease(nonce);
     }
 
     @UsedByGodot
@@ -3962,14 +3963,19 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         if (destroyed) return;
         if ("startObserver".equals(operation)) {
             String nonce = result.optString("nonce", "");
-            if (observerReleasePending) {
+            if (!requestId.equals(observerStartRequestId)) {
+                // The task was rebound or released while this start was in
+                // flight. Close only the stale helper; never let it replace the
+                // current task's observer.
                 if (!nonce.isEmpty()) writeObserverRelease(nonce);
-                observerReleasePending = false;
-            } else if (result.optBoolean("ok", false) && result.optBoolean("observer", false) && !nonce.isEmpty()) {
-                observerNonce = nonce;
-                watchObserverEvents(nonce);
             } else {
-                observerRequestedTaskId = -1;
+                observerStartRequestId = "";
+                if (result.optBoolean("ok", false) && result.optBoolean("observer", false) && !nonce.isEmpty()) {
+                    observerNonce = nonce;
+                    watchObserverEvents(nonce);
+                } else {
+                    observerRequestedTaskId = -1;
+                }
             }
         }
         if (requestId.equals(homeSnapshotRequestId)) {
@@ -4404,8 +4410,13 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     // ========================================================================
 
     @UsedByGodot
+    public int getAppTargetSdkVersion() {
+        return activity == null ? -1 : activity.getApplicationInfo().targetSdkVersion;
+    }
+
+    @UsedByGodot
     public boolean rootAvailable() {
-        boolean available = activity != null && RootShell.isAvailable();
+        boolean available = activity != null && RootShell.isAvailable(activity);
         Log.d(TAG, "rootAvailable: " + available);
         return available;
     }

@@ -1,8 +1,8 @@
 name: Export
 
-# One workflow, three platform jobs (parallel, independently re-runnable),
-# plus a release job that attaches all binaries together - a release is
-# all-or-nothing, never 2 of 3 platforms.
+# One workflow, three platform jobs (parallel, independently re-runnable)
+# producing four binaries, plus a release job that attaches them together -
+# a release is all-or-nothing, never a partial platform/channel set.
 #
 # All jobs run on ubuntu-latest: Godot export templates are self-contained
 # prebuilt binaries, so Windows/Linux/Android all export from one Linux
@@ -132,6 +132,13 @@ jobs:
         yes | "$SDKMANAGER" --licenses >/dev/null || true
         "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0" "platforms;android-34" "build-tools;34.0.0"
 
+    - name: Install apktool
+      run: |
+        # The legacy APK is post-processed to targetSdkVersion 22 after Godot's
+        # exporter has produced the lowest target it supports directly.
+        curl -fL "https://github.com/iBotPeaches/Apktool/releases/download/v3.0.3/apktool_3.0.3.jar" \
+          -o "$RUNNER_TEMP/apktool.jar"
+
     - uses: ./.github/actions/godot-setup
 
     - name: Configure Android SDK path + signing keystore
@@ -157,33 +164,40 @@ jobs:
         echo "keystore SHA-256: $ACTUAL_FP"
         [ "$ACTUAL_FP" = "$EXPECTED_KEYSTORE_FP" ]
 
-    - name: Export Android APK
+    - name: Export standard + legacy Android APKs
       run: |
-        mkdir -p build/android
         # Patch the build template SOURCE zip (PiP off, configChanges
         # hardening, GodotApp recreate guard - see the script header for
         # rationale). --install-android-build-template is a no-op unless
-        # combined with --export-*, so the generated android/build can't be
-        # patched in a separate step (a standalone run silently does nothing
-        # and hangs the job on the game process) - patch the zip it unpacks.
+        # combined with --export-*, so patch the zip before either export.
         TPL="$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable/android_source.zip"
         bash "$GITHUB_WORKSPACE/android/template_patches/apply_template_patches.sh" "$TPL"
-        # The preset uses gradle_build=true, so this runs a full Gradle build.
-        # --install-android-build-template lays down android/build (gitignored)
-        # from the (now patched) export templates before exporting.
-        ./godot/${GODOT_BIN} --headless --path . --install-android-build-template \
-          --export-debug "Android" build/android/Kyodai.apk
-        # Assert the APK carries the persistent signature (see env comment).
-        APK_FP=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs \
-          build/android/Kyodai.apk | grep -m1 "SHA-256 digest" | awk '{print $NF}')
-        echo "APK signer SHA-256: $APK_FP"
-        [ "$APK_FP" = "$EXPECTED_KEYSTORE_FP" ]
+        export GODOT_BIN="$GITHUB_WORKSPACE/godot/${GODOT_BIN}"
+        export APKTOOL_JAR="$RUNNER_TEMP/apktool.jar"
+        export APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+        export KS="$HOME/.local/share/godot/keystores/debug.keystore"
+        bash tools/build_release_variants.sh
+        # Both update channels must carry the same persistent signature.
+        for APK in dist/variants/Kyodai.apk dist/variants/Kyodai-legacy.apk; do
+          APK_FP=$("$APKSIGNER" verify --print-certs "$APK" \
+            | grep -m1 "SHA-256 digest" | awk '{print $NF}')
+          echo "$APK signer SHA-256: $APK_FP"
+          [ "$APK_FP" = "$EXPECTED_KEYSTORE_FP" ]
+        done
+        "$ANDROID_HOME/build-tools/35.0.0/aapt2" dump badging dist/variants/Kyodai-legacy.apk \
+          | grep -q "targetSdkVersion:'22'"
 
     - name: Upload Android artifact
       uses: actions/upload-artifact@v4
       with:
         name: kyodai-android-apk
-        path: build/android/Kyodai.apk
+        path: dist/variants/Kyodai.apk
+
+    - name: Upload legacy Android artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kyodai-android-legacy-apk
+        path: dist/variants/Kyodai-legacy.apk
 
   release:
     needs: [windows, linux, android]
@@ -206,3 +220,4 @@ jobs:
           artifacts/kyodai-windows-x64/Kyodai-windows-x64.zip
           artifacts/kyodai-linux-x64/Kyodai-x86_64.AppImage
           artifacts/kyodai-android-apk/Kyodai.apk
+          artifacts/kyodai-android-legacy-apk/Kyodai-legacy.apk

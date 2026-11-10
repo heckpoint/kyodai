@@ -226,7 +226,7 @@ final class StorageTier {
         if (!isRestrictedPath(path)) return TIER_DIRECT;
         if (selfHasExtDataRw()) return TIER_DIRECT;
         if (hasGrantCoverage(context, path)) return TIER_SAF;
-        if (RootShell.isAvailable()) return TIER_ROOT;
+        if (RootShell.isAvailable(context)) return TIER_ROOT;
         // No route can succeed; SAF fails loudly and the GDScript grant-prompt
         // flow owns the recovery UX.
         return TIER_SAF;
@@ -280,7 +280,7 @@ final class StorageTier {
         String pkg = restrictedPackage(path);
         String pkgDir = restrictedPackageDir(path);
         if (pkg == null || pkgDir == null) return;
-        if (!RootShell.isAvailable()) return;
+        if (!RootShell.isAvailable(context)) return;
         int uid = uidForPackage(context, pkg);
         if (uid < 0) return;
         String owner = uid + ":" + EXT_DATA_RW_GID;

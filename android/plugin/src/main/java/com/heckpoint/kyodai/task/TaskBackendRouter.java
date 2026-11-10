@@ -31,7 +31,7 @@ public final class TaskBackendRouter {
     public TaskBackendRouter(Context context, ResultListener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
-        backend = RootShell.isAvailable()
+        backend = RootShell.isAvailable(context)
                 ? new VendorTaskBackend(context)
                 : new PublicTaskBackend();
     }
@@ -39,7 +39,7 @@ public final class TaskBackendRouter {
     private AndroidTaskBackend backend() {
         AndroidTaskBackend current = backend;
         if (current instanceof VendorTaskBackend) return current;
-        if (!RootShell.isAvailable()) return current;
+        if (!RootShell.isAvailable(context)) return current;
         synchronized (this) {
             if (!(backend instanceof VendorTaskBackend)) {
                 backend = new VendorTaskBackend(context);

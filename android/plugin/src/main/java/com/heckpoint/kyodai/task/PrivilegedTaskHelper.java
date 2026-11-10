@@ -6,7 +6,6 @@ import android.graphics.BitmapFactory;
 import android.graphics.ColorSpace;
 import android.hardware.HardwareBuffer;
 import android.os.Binder;
-import android.os.FileObserver;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Process;
@@ -29,7 +28,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -60,6 +58,7 @@ public final class PrivilegedTaskHelper {
         PrivilegedTaskHelper helper = new PrivilegedTaskHelper();
         boolean homeCurtain = args.length == 2 && "--home-curtain".equals(args[1]);
         boolean observer = args.length == 2 && "--observe".equals(args[1]);
+        int status = 0;
         try {
             if (args.length != 1 && !homeCurtain && !observer) {
                 throw new Exception("invalid_request", new Exception("Expected request directory"));
@@ -75,7 +74,13 @@ public final class PrivilegedTaskHelper {
                 helper.execute();
             }
         } catch (Throwable t) {
+            status = 1;
             if (!homeCurtain) helper.writeFailure(t);
+        } finally {
+            // This is a one-shot command-line process, not an Android activity.
+            // Do not let a runtime/binder thread keep the vendor root shell open
+            // after the result has been published.
+            System.exit(status);
         }
     }
 
@@ -185,24 +190,16 @@ public final class PrivilegedTaskHelper {
     }
 
     private boolean awaitFile(File target, long timeoutMs) throws InterruptedException {
-        if (target.isFile()) return true;
-        File parent = target.getParentFile();
-        if (parent == null || !parent.isDirectory()) return false;
-        CountDownLatch latch = new CountDownLatch(1);
-        FileObserver observer = new FileObserver(parent.getAbsolutePath(),
-                FileObserver.CREATE | FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
-            @Override
-            public void onEvent(int event, String path) {
-                if (target.getName().equals(path)) latch.countDown();
-            }
-        };
-        observer.startWatching();
-        try {
-            if (target.isFile()) return true;
-            return latch.await(timeoutMs, TimeUnit.MILLISECONDS);
-        } finally {
-            observer.stopWatching();
+        // FileObserver leaves a non-daemon thread behind in standalone
+        // app_process helpers, preventing the VM and root wrapper from exiting.
+        // These waits are short, so bounded polling is cheaper and deterministic.
+        long deadline = SystemClock.uptimeMillis() + timeoutMs;
+        while (!target.isFile()) {
+            long remaining = deadline - SystemClock.uptimeMillis();
+            if (remaining <= 0) break;
+            Thread.sleep(Math.min(25, remaining));
         }
+        return target.isFile();
     }
 
     private boolean spawnHomeCurtain() {
@@ -247,7 +244,7 @@ public final class PrivilegedTaskHelper {
         builder.redirectOutput(new File("/dev/null"));
         java.lang.Process child = builder.start();
         File ready = new File(requestDir, "observer-ready");
-        if (!awaitFile(ready, 500)) {
+        if (!awaitFile(ready, 3000)) {
             child.destroy();
             throw new Exception("unavailable", new Exception("Task observer failed to start"));
         }
@@ -350,40 +347,19 @@ public final class PrivilegedTaskHelper {
     }
 
     private void awaitObserverRelease(File release, int ownerPid) throws InterruptedException {
-        CountDownLatch latch = new CountDownLatch(1);
-        FileObserver releaseObserver = new FileObserver(release.getParentFile().getAbsolutePath(),
-                FileObserver.CREATE | FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO) {
-            @Override
-            public void onEvent(int event, String path) {
-                if (release.getName().equals(path)) latch.countDown();
-            }
-        };
-        FileObserver ownerObserver = new FileObserver("/proc/" + ownerPid, FileObserver.DELETE_SELF) {
-            @Override
-            public void onEvent(int event, String path) {
-                latch.countDown();
-            }
-        };
-        releaseObserver.startWatching();
-        ownerObserver.startWatching();
         long curtainDeadline = 0;
-        try {
-            if (release.isFile()) return;
-            while (!observerStopped && !release.isFile() && new File("/proc/" + ownerPid).exists()) {
-                if (observerCurtain != null && curtainDeadline == 0) {
-                    curtainDeadline = SystemClock.uptimeMillis() + 10000;
-                }
-                if (curtainDeadline > 0) {
-                    long remaining = curtainDeadline - SystemClock.uptimeMillis();
-                    if (remaining <= 0) return;
-                    if (latch.await(Math.min(remaining, 1000), TimeUnit.MILLISECONDS)) return;
-                } else if (latch.await(1, TimeUnit.SECONDS)) {
-                    return;
-                }
+        File owner = new File("/proc/" + ownerPid);
+        while (!observerStopped && !release.isFile() && owner.exists()) {
+            if (observerCurtain != null && curtainDeadline == 0) {
+                curtainDeadline = SystemClock.uptimeMillis() + 10000;
             }
-        } finally {
-            releaseObserver.stopWatching();
-            ownerObserver.stopWatching();
+            long sleepMs = 100;
+            if (curtainDeadline > 0) {
+                long remaining = curtainDeadline - SystemClock.uptimeMillis();
+                if (remaining <= 0) return;
+                sleepMs = Math.min(sleepMs, remaining);
+            }
+            Thread.sleep(sleepMs);
         }
     }
 

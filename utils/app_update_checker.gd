@@ -104,7 +104,14 @@ static func _platform_asset_pattern() -> String:
 	if SystemManager.platform.is_linux():
 		return "Kyodai-.*\\.AppImage"
 	if SystemManager.platform.is_android():
-		return "Kyodai.*\\.apk"
+		# Distribution channels are locked: legacy users never migrate to the
+		# standard artifact, and standard users never migrate to legacy. The
+		# installed target SDK determines which asset is eligible, not recency.
+		if Engine.has_singleton("KyodaiBridge"):
+			var target = Engine.get_singleton("KyodaiBridge").call("getAppTargetSdkVersion")
+			if target >= 0 and target <= 22:
+				return "Kyodai-legacy\\.apk"
+		return "Kyodai\\.apk"
 	return ""
 
 static func _notify(text: String, type: int) -> void:

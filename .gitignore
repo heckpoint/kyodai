@@ -15,6 +15,7 @@ node_modules/
 
 # Exported application binaries (CI recreates build/ as needed)
 build/
+dist/variants/
 
 # Android build artifacts and cache
 android/.gradle/

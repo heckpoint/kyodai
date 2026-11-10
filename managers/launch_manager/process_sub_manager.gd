@@ -400,13 +400,19 @@ func retain_active_android_session() -> bool:
 	var session := _active_session
 	launch_manager.android_tasks.set_retained_identity(session.runtime, false)
 	launch_manager.sessions.retain_session(session, false)
-	# Returning to Kyodai is also a reconciliation point. If the user closed
-	# the emulator externally, its confirmed-missing task ends the session
-	# instead of leaving a dead retained record and capturing a stale curtain.
-	if not await _android_task_exists(session.runtime):
+	# Returning to Kyodai is also a reconciliation point. Emulator bootstrap
+	# activities can hand off to a new task (RetroArch CoreSideloadActivity ->
+	# RetroActivityFuture), so rebind a unique package/profile successor before
+	# deciding that the emulator exited. Only a confirmed-missing package may
+	# finalize the session and upload saves.
+	var identity_status := await _reconcile_android_task_identity(session)
+	if identity_status != "ok":
 		_android_transition_inflight = false
 		launch_manager.android_tasks.release_observer()
-		await _finalize_android_sessions_for_package(str(session.runtime.get("package", "")))
+		if identity_status == "missing":
+			await _finalize_android_sessions_for_package(str(session.runtime.get("package", "")))
+		elif identity_status != "cancelled":
+			mark_android_session_lost(session)
 		return false
 	var captured_any := false
 	if await launch_manager.android_tasks.snapshots_available():
@@ -424,10 +430,14 @@ func retain_active_android_session() -> bool:
 		launch_manager.sessions.update_runtime(session, session.runtime)
 	if _android_task_removal_pending:
 		_android_task_removal_pending = false
-		if not await _android_task_exists(session.runtime):
+		identity_status = await _reconcile_android_task_identity(session)
+		if identity_status != "ok":
 			_android_transition_inflight = false
 			launch_manager.android_tasks.release_observer()
-			await _finalize_android_sessions_for_package(str(session.runtime.get("package", "")))
+			if identity_status == "missing":
+				await _finalize_android_sessions_for_package(str(session.runtime.get("package", "")))
+			elif identity_status != "cancelled":
+				mark_android_session_lost(session)
 			return false
 	_android_transition_inflight = false
 	# Publish the snapshot to cards before starting the visible return
@@ -445,12 +455,19 @@ func resume_retained_game(romm_id: int = -1) -> Dictionary:
 	if session.state == GameSession.State.LOST:
 		return {"ok": false, "code": "lost"}
 	_android_transition_inflight = true
+	var identity_status := await _reconcile_android_task_identity(session)
+	if identity_status != "ok":
+		_android_transition_inflight = false
+		if identity_status == "missing":
+			mark_android_session_lost(session)
+		return {"ok": false, "code": "task_unverified" if identity_status != "missing" else "stale_task"}
 	var focused: Dictionary = await launch_manager.android_tasks.focus(session.runtime)
 	_android_transition_inflight = false
 	if focused.get("ok", false):
 		var task: Dictionary = focused.get("task", {})
 		if not task.is_empty():
 			session.runtime.merge({
+				"taskId": int(task.get("taskId", session.runtime.taskId)),
 				"package": str(task.get("packageName", session.runtime.package)),
 				"topActivity": str(task.get("topActivity", session.runtime.topActivity)),
 				"baseActivity": str(task.get("baseActivity", session.runtime.get("baseActivity", ""))),
@@ -479,8 +496,10 @@ func reconcile_android_task_removed(session: GameSession) -> void:
 		_android_task_removal_pending = true
 		return
 	# Native task events are hints to revalidate, not standalone finalization
-	# permission. Backend uncertainty still preserves the recovery record.
-	if await _android_task_exists(session.runtime):
+	# permission. A task-removal event commonly describes a bootstrap activity
+	# being replaced by the emulator's real gameplay task.
+	var identity_status := await _reconcile_android_task_identity(session)
+	if identity_status != "missing":
 		return
 	if session != _active_session or (session.state != GameSession.State.ACTIVE and session.state != GameSession.State.RETAINED):
 		return
@@ -508,8 +527,13 @@ func close_retained_game(romm_id: int = -1) -> Dictionary:
 	# Restore cover art immediately while native task-death confirmation runs.
 	# Keep the snapshot on disk so a failed close can restore retained visuals.
 	session_changed_for_android()
-	var task_exists := await _android_task_exists(session.runtime)
-	if task_exists:
+	var identity_status := await _reconcile_android_task_identity(session, true)
+	if identity_status == "error" or identity_status == "ambiguous" or identity_status == "cancelled":
+		session.state = GameSession.State.RETAINED
+		_android_transition_inflight = false
+		session_changed_for_android()
+		return {"ok": false, "code": "task_unverified"}
+	if identity_status == "ok":
 		var stopped: Dictionary = await launch_manager.android_tasks.force_stop(session.runtime)
 		if not stopped.get("ok", false) and stopped.get("code", "") != "stale_task":
 			session.state = GameSession.State.RETAINED
@@ -523,9 +547,15 @@ func close_retained_game(romm_id: int = -1) -> Dictionary:
 		session_changed_for_android()
 		return removed
 	for attempt in 8:
-		if not await _android_task_exists(session.runtime):
+		identity_status = await _reconcile_android_task_identity(session, true)
+		if identity_status == "missing":
 			break
-	if await _android_task_exists(session.runtime):
+		if identity_status == "error" or identity_status == "ambiguous" or identity_status == "cancelled":
+			session.state = GameSession.State.RETAINED
+			_android_transition_inflight = false
+			session_changed_for_android()
+			return {"ok": false, "code": "close_unconfirmed"}
+	if identity_status != "missing":
 		session.state = GameSession.State.RETAINED
 		_android_transition_inflight = false
 		session_changed_for_android()
@@ -539,14 +569,70 @@ func discard_lost_android_session() -> void:
 		return
 	await _finalize_android_sessions_for_package(str(_active_session.runtime.get("package", "")))
 
-func _android_task_exists(runtime: Dictionary) -> bool:
+## Resolves the current task identity without treating an activity/task handoff
+## as process death. A successor is accepted only when it is the sole task for
+## the same package and user/profile. Errors and ambiguity are never proof that
+## the emulator exited.
+func _resolve_android_task(runtime: Dictionary) -> Dictionary:
 	var result: Dictionary = await launch_manager.android_tasks.list_tasks()
 	if not result.get("ok", false):
-		return true # uncertainty must never become permission to finalize
+		return {"status": "error", "result": result}
+	var package_name := str(runtime.get("package", ""))
+	var task_id := int(runtime.get("taskId", -1))
+	var user_id := int(runtime.get("userId", 0))
+	if package_name.is_empty() or task_id <= 0:
+		return {"status": "error", "result": {"code": "invalid_request"}}
+	var candidates: Array = []
 	for task in result.get("tasks", []):
-		if int(task.get("taskId", -1)) == int(runtime.get("taskId", -2)):
-			return true
-	return false
+		if str(task.get("packageName", "")) != package_name:
+			continue
+		if int(task.get("userId", 0)) != user_id:
+			continue
+		if int(task.get("taskId", -1)) == task_id:
+			return {"status": "ok", "task": task}
+		candidates.append(task)
+	if candidates.size() == 1:
+		return {"status": "ok", "task": candidates[0]}
+	if candidates.size() > 1:
+		return {"status": "ambiguous"}
+	return {"status": "missing"}
+
+## Revalidates and, when necessary, rebinds a live session to its current task.
+func _reconcile_android_task_identity(session: GameSession, allow_closing: bool = false) -> String:
+	if session == null:
+		return "cancelled"
+	var resolved: Dictionary = await _resolve_android_task(session.runtime)
+	if session != _active_session or session.state == GameSession.State.ENDED:
+		return "cancelled"
+	if session.state == GameSession.State.CLOSING and not allow_closing:
+		return "cancelled"
+	if str(resolved.get("status", "")) != "ok":
+		return str(resolved.get("status", "error"))
+	var task: Dictionary = resolved.get("task", {})
+	if task.is_empty():
+		return "error"
+	var old_task_id := int(session.runtime.get("taskId", -1))
+	var old_top_activity := str(session.runtime.get("topActivity", ""))
+	var updated := {
+		"taskId": int(task.get("taskId", old_task_id)),
+		"package": str(task.get("packageName", session.runtime.get("package", ""))),
+		"topActivity": str(task.get("topActivity", old_top_activity)),
+		"baseActivity": str(task.get("baseActivity", session.runtime.get("baseActivity", ""))),
+		"displayId": int(task.get("displayId", session.runtime.get("displayId", 0))),
+		"userId": int(task.get("userId", session.runtime.get("userId", 0))),
+	}
+	var changed := false
+	for key in updated:
+		if session.runtime.get(key) != updated[key]:
+			changed = true
+			break
+	if not changed:
+		return "ok"
+	launch_manager.sessions.update_runtime(session, updated)
+	launch_manager.android_tasks.set_retained_identity(session.runtime, session.state == GameSession.State.ACTIVE)
+	print("[ProcessManager] Android task identity rebound: task ", old_task_id, " -> ", updated.taskId,
+		" (", old_top_activity, " -> ", updated.topActivity, ")")
+	return "ok"
 
 func _finalize_android_sessions_for_package(package_name: String) -> void:
 	if package_name.is_empty():
@@ -911,20 +997,20 @@ func _try_reattach_android_session(record: Dictionary) -> String:
 	var task_id := int(runtime.get("taskId", -1))
 	if task_id <= 0:
 		return "invalid"
-	var result: Dictionary = await launch_manager.android_tasks.list_tasks()
-	if not result.get("ok", false):
+	var resolved: Dictionary = await _resolve_android_task(runtime)
+	var status := str(resolved.get("status", "error"))
+	if status != "ok" and status != "missing":
 		return "error"
-	for task in result.get("tasks", []):
-		if int(task.get("taskId", -1)) != task_id:
-			continue
-		if str(task.get("packageName", "")) != str(runtime.get("package", "")):
-			continue
+	if status == "ok":
+		var task: Dictionary = resolved.get("task", {})
+		if task.is_empty():
+			return "error"
 		var romm_id := int(record.get("romm_id", 0))
 		var game := _game_for_pending_session(romm_id)
 		if game == null:
 			return "invalid"
 		var restored_runtime := runtime.duplicate(true)
-		restored_runtime["taskId"] = task_id
+		restored_runtime["taskId"] = int(task.get("taskId", task_id))
 		restored_runtime["package"] = str(task.packageName)
 		restored_runtime["topActivity"] = str(task.topActivity)
 		restored_runtime["baseActivity"] = str(task.get("baseActivity", ""))

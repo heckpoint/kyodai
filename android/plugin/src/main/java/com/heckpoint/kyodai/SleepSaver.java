@@ -223,7 +223,7 @@ public final class SleepSaver {
     // ------------------------------------------------------------------
 
     public static boolean isSupported() {
-        return RootShell.isAvailable();
+        return appContext != null && RootShell.isAvailable(appContext);
     }
 
     public static boolean isDisplayInteractive(Context context) {

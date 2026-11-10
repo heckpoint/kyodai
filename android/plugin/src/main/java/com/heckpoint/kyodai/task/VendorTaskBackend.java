@@ -31,7 +31,7 @@ public final class VendorTaskBackend implements AndroidTaskBackend {
 
     @Override
     public Capabilities probeCapabilities() throws TaskBackendException {
-        if (!RootShell.isAvailable()) return new Capabilities();
+        if (!RootShell.isAvailable(context)) return new Capabilities();
         try {
             JSONObject result = execute("probe", new JSONObject());
             return capabilitiesFrom(result.getJSONObject("capabilities"));
@@ -147,7 +147,7 @@ public final class VendorTaskBackend implements AndroidTaskBackend {
     }
 
     private JSONObject execute(String op, JSONObject expected) throws TaskBackendException {
-        if (!RootShell.isAvailable()) {
+        if (!RootShell.isAvailable(context)) {
             throw new TaskBackendException("unsupported", "Enhanced device access is unavailable on this firmware");
         }
         File dir = null;
