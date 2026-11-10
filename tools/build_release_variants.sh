@@ -41,7 +41,10 @@ trap restore_preset EXIT
 
 # Standard artifact: current target and existing update channel.
 (cd "$repo_root/android" && ./build_plugin.sh)
-(cd "$repo_root" && "$GODOT_BIN" --headless --path . --export-debug "Android" "$out_dir/Kyodai.apk")
+# Install the patched build template on clean CI runners as part of the first
+# export; subsequent exports reuse android/build.
+(cd "$repo_root" && "$GODOT_BIN" --headless --path . --install-android-build-template \
+  --export-debug "Android" "$out_dir/Kyodai.apk")
 
 # Legacy base artifact: export with the lowest target Godot accepts, then patch
 # only the manifest's target SDK. Package identity and all other content stay
