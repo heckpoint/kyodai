@@ -2038,12 +2038,6 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         return StorageTier.selfHasExtDataRw();
     }
 
-    /** 0=direct, 1=saf, 2=root - the write tier for a path (diagnostics). */
-    @UsedByGodot
-    public int storageTierForPath(String path) {
-        return StorageTier.tierFor(activity, path);
-    }
-
     /**
      * 0=direct, 1=saf, 2=root, 3=none - the access route for a path. This is
      * the single source of truth for GDScript flow decisions: NONE means no
@@ -2140,12 +2134,6 @@ public class KyodaiBridgePlugin extends GodotPlugin {
             }
         }
         return false;
-    }
-
-    /** Returns true if a persisted tree grant covers the given path. */
-    @UsedByGodot
-    public boolean hasSafGrantFor(String path) {
-        return treeUriForPath(path) != null;
     }
 
     private Set<String> getStoredTreeUriStrings() {
@@ -2519,118 +2507,6 @@ public class KyodaiBridgePlugin extends GodotPlugin {
                 }
                 Log.w(TAG, "DocumentsContract dirExists failed: " + msg);
             }
-        }
-        
-        return false;
-    }
-    
-    /**
-     * Reads a file and returns its contents as a base64-encoded string.
-     * Uses DocumentsContract for restricted paths.
-     */
-    @UsedByGodot
-    public String androidReadFile(String path) {
-        long t0 = SafPerf.start();
-        try { return androidReadFileImpl(path); }
-        finally { SafPerf.record("androidReadFile", t0); }
-    }
-
-    private String androidReadFileImpl(String path) {
-        if (path == null || path.isEmpty()) {
-            return "";
-        }
-        
-        try {
-            java.io.InputStream inputStream = null;
-            
-            // Try direct access first
-            File file = new File(path);
-            if (file.exists() && file.canRead()) {
-                inputStream = new java.io.FileInputStream(file);
-            } else if (requiresDocumentsContract(path)) {
-                // Use DocumentsContract
-                Uri docUri = pathToDocumentUri(path);
-                if (docUri != null) {
-                    inputStream = activity.getContentResolver().openInputStream(docUri);
-                }
-            }
-            
-            if (inputStream == null) {
-                return "";
-            }
-            
-            // Read all bytes
-            java.io.ByteArrayOutputStream byteStream = new java.io.ByteArrayOutputStream();
-            byte[] buffer = new byte[8192];
-            int bytesRead;
-            while ((bytesRead = inputStream.read(buffer)) != -1) {
-                byteStream.write(buffer, 0, bytesRead);
-            }
-            inputStream.close();
-            
-            // Encode as base64
-            String base64 = android.util.Base64.encodeToString(byteStream.toByteArray(), android.util.Base64.NO_WRAP);
-            return base64;
-            
-        } catch (Exception e) {
-            Log.e(TAG, "Error reading file: " + path + " - " + e.getMessage());
-            return "";
-        }
-    }
-    
-    /**
-     * Writes base64-encoded data to a file.
-     * Uses DocumentsContract for restricted paths.
-     */
-    @UsedByGodot
-    public boolean androidWriteFile(String path, String base64Data) {
-        long t0 = SafPerf.start();
-        try { return androidWriteFileImpl(path, base64Data); }
-        finally { SafPerf.record("androidWriteFile", t0); }
-    }
-
-    private boolean androidWriteFileImpl(String path, String base64Data) {
-        SafCache.invalidateTree(path);
-        if (path == null || path.isEmpty() || base64Data == null) {
-            return false;
-        }
-        
-        try {
-            byte[] data = android.util.Base64.decode(base64Data, android.util.Base64.NO_WRAP);
-            
-            // Try direct access first
-            File file = new File(path);
-            File parentDir = file.getParentFile();
-            if (parentDir != null && !parentDir.exists()) {
-                parentDir.mkdirs();
-            }
-            
-            if (parentDir != null && parentDir.canWrite()) {
-                java.io.FileOutputStream outputStream = new java.io.FileOutputStream(file);
-                outputStream.write(data);
-                outputStream.close();
-                return true;
-            }
-            
-            // Restricted-path fallback: root daemon when no SAF grant covers
-            // the path, else DocumentsContract.
-            if (requiresDocumentsContract(path)) {
-                int tier = StorageTier.tierFor(activity, path);
-                if (tier == StorageTier.TIER_ROOT) {
-                    StorageTier.logOp("write", path, tier);
-                    return StorageTier.rootWriteFile(activity, path, data);
-                }
-                java.io.OutputStream outputStream = openOutputFor(path);
-                if (outputStream != null) {
-                    outputStream.write(data);
-                    outputStream.close();
-                    postSafFixup(path);
-                    return true;
-                }
-            }
-            
-        } catch (Exception e) {
-            Log.e(TAG, "Error writing file: " + path + " - " + e.getMessage());
         }
         
         return false;

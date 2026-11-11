@@ -128,8 +128,6 @@ func _init_strategies() -> void:
 				return record_path.get_base_dir(),
 			"save_name": func(game: GameResource, _path: String) -> String:
 				return _get_save_identity(game).id,
-			"zip": func(src: String, dst: String, game: GameResource) -> bool:
-				return FSM.zip_directory(src, dst, -1, _get_save_identity(game).id),
 		},
 		"dolphin": {
 			"validate": func(tid: String) -> String:
@@ -150,8 +148,6 @@ func _init_strategies() -> void:
 				if game.platform_slug == "wii":
 					return _get_save_identity(game).id
 				return _gc_ascii_id(_get_save_identity(game).id),
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				return FSM.zip_directory(src, dst),
 		},
 		"eden": {
 			"validate": func(tid: String) -> String:
@@ -164,8 +160,6 @@ func _init_strategies() -> void:
 				return record_path,
 			"save_name": func(game: GameResource, _path: String) -> String:
 				return _get_save_identity(game).id,
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				return FSM.zip_directory(src, dst),
 		},
 		"pcsx2": {
 			"validate": func(tid: String) -> String:
@@ -183,8 +177,6 @@ func _init_strategies() -> void:
 				return FSM.join_paths(save_dir, folder_name),
 			"save_name": func(game: GameResource, local_file_path: String) -> String:
 				return local_file_path.get_file() if local_file_path != "" else _get_save_identity(game).id,
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				return FSM.zip_directory(src, dst),
 		},
 		"ppsspp": {
 			"validate": func(tid: String) -> String:
@@ -211,9 +203,6 @@ func _init_strategies() -> void:
 				return _save_dir,
 			"save_name": func(game: GameResource, _path: String) -> String:
 				return game.get_active_title_id(),
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				var folder_name = src.get_file()
-				return FSM.zip_directory(src, dst, -1, folder_name),
 		},
 		"rpcs3": {
 			"validate": func(tid: String) -> String:
@@ -230,9 +219,6 @@ func _init_strategies() -> void:
 				return _save_dir,
 			"save_name": func(game: GameResource, _path: String) -> String:
 				return game.get_active_title_id(),
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				var folder_name = src.get_file()
-				return FSM.zip_directory(src, dst, -1, folder_name),
 		},
 		"shadps4": {
 			"validate": func(tid: String) -> String:
@@ -249,9 +235,6 @@ func _init_strategies() -> void:
 				return _save_dir,
 			"save_name": func(game: GameResource, _path: String) -> String:
 				return game.get_active_title_id(),
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				var folder_name = src.get_file()
-				return FSM.zip_directory(src, dst, -1, folder_name),
 		},
 		"xenia": {
 			"validate": func(tid: String) -> String:
@@ -270,9 +253,6 @@ func _init_strategies() -> void:
 				_xenia_rehome_to_active_profile(save_dir, game.get_active_title_id()),
 			"save_name": func(game: GameResource, _path: String) -> String:
 				return game.get_active_title_id(),
-			"zip": func(src: String, dst: String, _game: GameResource) -> bool:
-				var folder_name = src.get_file()
-				return FSM.zip_directory(src, dst, -1, folder_name),
 		},
 		"azahar": {
 			"discover": func(dir: String, game: GameResource) -> Array[Dictionary]:
@@ -2097,16 +2077,11 @@ func _get_retroarch_save_name(game: GameResource, local_file_path: String) -> St
 
 ## Creates a ZIP archive for a RetroArch save, dispatching by platform.
 func _zip_retroarch_save(src: String, dst: String, game: GameResource) -> bool:
-	match game.platform_slug:
-		"psp":
-			return _zip_psp_save(src, _get_save_identity(game).id, dst, MAX_FILE_SIZE)
-		"3ds":
-			return _zip_3ds_save(src, dst, game)
-		"ps2", "ngc", "wii":
-			return FSM.zip_directory(src, dst)
-		_:
-			var folder_name = src.get_file()
-			return FSM.zip_directory(src, dst, -1, folder_name)
+	if game.platform_slug == "psp":
+		return _zip_psp_save(src, _get_save_identity(game).id, dst, MAX_FILE_SIZE)
+	if game.platform_slug == "3ds":
+		return _zip_3ds_save(src, dst, game)
+	return FSM.zip_directory(src, dst, -1, _get_upload_zip_root_name("retroarch", game, src))
 
 ## Determines the extraction destination for downloaded saves based on emulator
 ## Returns the destination directory path
@@ -2172,8 +2147,7 @@ func _zip_emulator_save(emulator_id: String, source_path: String, zip_path: Stri
 			zip_ok = strategy.call(source_path, zip_path, game)
 	else:
 		var root_name := _get_upload_zip_root_name(emulator_id, game, source_path)
-		var max_size := MAX_FILE_SIZE if architecture == "ppsspp" else -1
-		zip_ok = FSM.zip_directory(source_path, zip_path, max_size, root_name)
+		zip_ok = FSM.zip_directory(source_path, zip_path, -1, root_name)
 	if zip_ok and not _zip_has_entries(zip_path):
 		push_error("[GameSaveSubManager] Refusing empty save zip (no entries): %s (source: %s)" % [zip_path, source_path])
 		FSM.delete_file(zip_path)

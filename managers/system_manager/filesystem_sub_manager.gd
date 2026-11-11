@@ -1071,15 +1071,6 @@ static func open_file_read(path: String) -> FileAccess:
 	path = resolve_content_uri(path)
 	return FileAccess.open(path, FileAccess.READ)
 
-## Opens a file for writing
-## Returns FileAccess object or null on failure
-static func open_file_write(path: String) -> FileAccess:
-	if path.is_empty():
-		return null
-	
-	path = resolve_content_uri(path)
-	return FileAccess.open(path, FileAccess.WRITE)
-
 ## Writes string content to a file
 static func write_file(path: String, content: String) -> bool:
 	if path.is_empty():
@@ -1688,10 +1679,6 @@ static func _get_7z_binary_path() -> String:
 static func get_dir(path: String) -> String:
 	return path.get_base_dir()
 
-## Gets the filename portion of a path
-static func get_filename(path: String) -> String:
-	return path.get_file()
-
 ## Gets the file extension
 static func get_extension(path: String) -> String:
 	return path.get_extension()
@@ -1716,18 +1703,6 @@ static func get_files(path: String) -> Array[String]:
 	for item in items:
 		var item_path = join_paths(path, item)
 		if not is_dir(item_path):
-			result.append(item)
-	
-	return result
-
-## Gets a list of all subdirectories in a directory
-static func get_dirs(path: String) -> Array[String]:
-	var result: Array[String] = []
-	var items = list_dir(path)
-	
-	for item in items:
-		var item_path = join_paths(path, item)
-		if is_dir(item_path):
 			result.append(item)
 	
 	return result

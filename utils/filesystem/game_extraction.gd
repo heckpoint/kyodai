@@ -28,15 +28,7 @@ static func ps4_title_id_candidate(path: String) -> Dictionary:
 	var parts := path.replace("\\", "/").split("/", false)
 	for i in range(parts.size()):
 		var candidate := parts[i]
-		if candidate.length() != 9 or not candidate.begins_with("CUSA"):
-			continue
-		var valid := true
-		for char_index in range(4, 9):
-			var code := candidate.unicode_at(char_index)
-			if code < 48 or code > 57:
-				valid = false
-				break
-		if valid:
+		if ps4_title_id_is_valid(candidate):
 			return {"title_id": candidate, "depth": i}
 	return {}
 

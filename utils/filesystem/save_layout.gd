@@ -7,13 +7,11 @@ const BARE_CONTENTS := "bare_contents"
 const NAMED_ROOT := "named_root"
 const MULTI_ROOT := "multi_root"
 const ROUTED_COMPONENTS := "routed_components"
-const PLAIN_FILE := "plain_file"
 
 const COMMIT_REPLACE := "replace"
 const COMMIT_MERGE := "merge"
 const COMMIT_REPLACE_COMPONENTS := "replace_components"
 const COMMIT_ROUTED := "routed"
-const COMMIT_NONE := "none"
 
 const ZIP_ROOT_NONE := "none"
 const ZIP_ROOT_SAVE_ID := "save_id"
