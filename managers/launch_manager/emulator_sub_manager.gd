@@ -210,8 +210,11 @@ func _cleanup_extraction_staging(staging_dir: String) -> void:
 		return
 	FSM.delete_dir_recursive(staging_dir)
 
-func _fail_extraction(emulator_id: String, progress_message: String, staging_dir: String = "") -> void:
-	_cleanup_extraction_staging(staging_dir)
+func _fail_extraction(emulator_id: String, progress_message: String, staging_dir: String = "", preserve_staging: bool = false) -> void:
+	if not preserve_staging:
+		_cleanup_extraction_staging(staging_dir)
+	elif staging_dir != "":
+		push_warning("[EmulatorManager] Preserving extraction recovery data at " + staging_dir)
 	_emulator_install_progress[emulator_id] = progress_message
 	_end_force_install(emulator_id)
 	launch_manager.emulator_extraction_completed.emit(emulator_id, false)
@@ -887,10 +890,10 @@ func _execute_extract_step(emulator_id: String, step_index: int, extract_config:
 				push_error("[EmulatorManager] Staged validation failed for " + emulator_id)
 				_fail_extraction(emulator_id, "Staged validation failed", staging_dir)
 				return
-			var commit := FSM.merge_extraction_payload(staging_dir, extract_dir)
+			var commit := FSM.merge_extraction_payload(staging_dir, extract_dir, bool(normalization.get("scan_complete", false)), normalization.get("entries", []))
 			if str(commit.get("status", "")) != "committed":
 				push_error("[EmulatorManager] Extraction commit failed for " + emulator_id + ": " + str(commit.get("error", "unknown error")))
-				_fail_extraction(emulator_id, "Extraction commit failed", staging_dir)
+				_fail_extraction(emulator_id, "Extraction commit failed", staging_dir, bool(commit.get("preserve_source", false)))
 				return
 
 		# Full registry validation runs against the committed live install.
@@ -992,6 +995,7 @@ func _execute_batch_extract_step(emulator_id: String, step_index: int, extract_c
 	
 	var staging_by_item := {}
 	var archive_by_item := {}
+	var preserved_staging := {}
 	var batch_callback = func(success: bool, _message: String, completed_item_id: String):
 		progress.completed += 1
 		var staging_dir := str(staging_by_item.get(completed_item_id, ""))
@@ -1010,11 +1014,15 @@ func _execute_batch_extract_step(emulator_id: String, step_index: int, extract_c
 				push_error("[EmulatorManager] Batch staged validation failed for " + emulator_id)
 				_cleanup_extraction_staging(staging_dir)
 			else:
-				var commit := FSM.merge_extraction_payload(staging_dir, extract_dir)
+				var commit := FSM.merge_extraction_payload(staging_dir, extract_dir, bool(normalization.get("scan_complete", false)), normalization.get("entries", []))
 				if str(commit.get("status", "")) != "committed":
 					progress.failed += 1
 					push_error("[EmulatorManager] Batch extraction commit failed for " + emulator_id + ": " + str(commit.get("error", "unknown error")))
-					_cleanup_extraction_staging(staging_dir)
+					if bool(commit.get("preserve_source", false)):
+						preserved_staging[completed_item_id] = true
+						push_warning("[EmulatorManager] Preserving batch recovery data at " + str(commit.get("recovery_path", staging_dir)))
+					else:
+						_cleanup_extraction_staging(staging_dir)
 
 		_emulator_install_progress[emulator_id] = step_display_name + " (" + str(progress.completed) + "/" + str(total_archives) + ")"
 		if progress.completed < total_archives:
@@ -1022,8 +1030,9 @@ func _execute_batch_extract_step(emulator_id: String, step_index: int, extract_c
 
 		SystemManager.notifications.dismiss_notification(batch_notification_id)
 		if progress.failed > 0:
-			for remaining_staging in staging_by_item.values():
-				_cleanup_extraction_staging(str(remaining_staging))
+			for remaining_id in staging_by_item:
+				if not preserved_staging.has(remaining_id):
+					_cleanup_extraction_staging(str(staging_by_item[remaining_id]))
 			_fail_extraction(emulator_id, "Extraction failed")
 			return
 

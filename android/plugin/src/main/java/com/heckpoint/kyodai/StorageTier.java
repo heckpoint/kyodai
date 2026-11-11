@@ -225,8 +225,10 @@ final class StorageTier {
     private static int tierForImpl(Context context, String path) {
         if (!isRestrictedPath(path)) return TIER_DIRECT;
         if (selfHasExtDataRw()) return TIER_DIRECT;
-        if (hasGrantCoverage(context, path)) return TIER_SAF;
+        // ROOT is the primary restricted-path fallback. SAF is only for devices
+        // without a live privileged route, even if an old grant still exists.
         if (RootShell.isAvailable(context)) return TIER_ROOT;
+        if (hasGrantCoverage(context, path)) return TIER_SAF;
         // No route can succeed; SAF fails loudly and the GDScript grant-prompt
         // flow owns the recovery UX.
         return TIER_SAF;

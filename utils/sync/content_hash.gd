@@ -126,7 +126,8 @@ static func _collect_folder_hash_lines(dir_path: String, zip_prefix: String, lin
 		if FSM.dir_exists(full_path):
 			_collect_folder_hash_lines(full_path, zip_path + "/", lines)
 		else:
-			if FSM.get_file_size(full_path) > 0:
-				var hash := FSM.md5_file(full_path)
-				if not hash.is_empty():
-					lines.append(zip_path + ":" + hash)
+			# Zero-length files are real ZIP entries and must affect the hash just
+			# as they do in compute_zip_hash() and FSM.zip_directory().
+			var hash := FSM.md5_file(full_path)
+			if not hash.is_empty():
+				lines.append(zip_path + ":" + hash)

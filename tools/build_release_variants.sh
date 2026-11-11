@@ -65,10 +65,14 @@ restore_preset
 decoded="$work_dir/decoded"
 rm -rf "$decoded"
 java -jar "$APKTOOL_JAR" d -f -o "$decoded" "$legacy_base"
-python3 - "$decoded/AndroidManifest.xml" <<'PY'
+python3 - "$decoded" <<'PY'
+import pathlib
+import re
 import sys
-path = sys.argv[1]
-text = open(path).read()
+
+root = pathlib.Path(sys.argv[1])
+path = root / "AndroidManifest.xml"
+text = path.read_text()
 entry = '    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="22" />'
 if '<uses-sdk ' in text:
     start = text.index('    <uses-sdk ')
@@ -77,7 +81,30 @@ if '<uses-sdk ' in text:
 else:
     marker = '    <supports-screens '
     text = text.replace(marker, entry + '\n' + marker, 1)
-open(path, 'w').write(text)
+path.write_text(text)
+
+# Apktool 3 also passes sdkInfo to aapt2. Keeping these values aligned with the
+# manifest is required; otherwise the final APK retains the standard channel's
+# SDK levels and resource validation sees conflicting metadata.
+metadata = root / "apktool.yml"
+text = metadata.read_text()
+text = re.sub(r'minSdkVersion: \d+', 'minSdkVersion: 24', text)
+text = re.sub(r'targetSdkVersion: \d+', 'targetSdkVersion: 22', text)
+metadata.write_text(text)
+
+# Adaptive icons require API 26. Target-22 resource linking rejects them, so
+# preserve the same foreground/background artwork in an API-1 layer-list. Keep
+# resource names/public IDs and the standard channel untouched.
+layer_list = '''<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@mipmap/icon_background" />
+    <item android:drawable="@mipmap/icon_foreground" />
+</layer-list>
+'''
+for name in ("icon.xml", "themed_icon.xml"):
+    icon = root / "res" / "mipmap-anydpi" / name
+    if icon.is_file() and "<adaptive-icon" in icon.read_text():
+        icon.write_text(layer_list)
 PY
 
 unsigned="$work_dir/legacy-unsigned.apk"

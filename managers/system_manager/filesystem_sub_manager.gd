@@ -6,6 +6,7 @@ extends Manager
 class_name FileSystemSubManager
 
 const ExtractionLayout = preload("res://utils/filesystem/extraction_layout.gd")
+const OperationLifecycle = preload("res://utils/filesystem/operation_lifecycle.gd")
 const DEBUG_LOG: bool = false
 
 ## Path format options for resolve_path()
@@ -704,6 +705,7 @@ static func _delete_dir_recursive_internal(path: String) -> bool:
 		if DEBUG_LOG: print("[SystemManager.filesystem] FAILED to open directory: " + path)
 		return false
 	
+	dir.set_include_hidden(true)
 	dir.list_dir_begin()
 	var file_name = dir.get_next()
 	var deleted_count = 0
@@ -764,6 +766,7 @@ static func list_dir(path: String) -> Array[String]:
 	if dir == null:
 		return result
 	
+	dir.set_include_hidden(true)
 	dir.list_dir_begin()
 	var file_name = dir.get_next()
 	while file_name != "":
@@ -773,6 +776,35 @@ static func list_dir(path: String) -> Array[String]:
 	dir.list_dir_end()
 	
 	return result
+
+## Returns names and types with one DirAccess per directory instead of opening
+## a separate handle for every entry. Used by extraction hot paths.
+static func _list_dir_entries(path: String) -> Array[Dictionary]:
+	return _list_dir_entries_result(path)["entries"]
+
+## Checked variant for commit/rollback paths where an unreadable directory must
+## not be mistaken for an empty one. SAF retains its existing provider behavior.
+static func _list_dir_entries_result(path: String) -> Dictionary:
+	var result: Array[Dictionary] = []
+	if path.is_empty():
+		return {"ok": false, "entries": result}
+	if _is_restricted_android_path(path):
+		for entry in list_dir(path):
+			var full_path := join_paths(path, entry)
+			result.append({"name": entry, "is_dir": is_dir(full_path), "is_link": is_symlink(full_path)})
+		return {"ok": true, "entries": result}
+	var dir := DirAccess.open(path)
+	if dir == null:
+		return {"ok": false, "entries": result}
+	dir.set_include_hidden(true)
+	dir.list_dir_begin()
+	var entry := dir.get_next()
+	while entry != "":
+		if entry != "." and entry != "..":
+			result.append({"name": entry, "is_dir": dir.current_is_dir(), "is_link": dir.is_link(entry)})
+		entry = dir.get_next()
+	dir.list_dir_end()
+	return {"ok": true, "entries": result}
 
 ## Renames a file or directory
 static func rename(source_path: String, dest_name: String) -> bool:
@@ -854,12 +886,11 @@ static func copy_dir(source: String, dest: String) -> bool:
 	var copied_count = 0
 	var failed_count = 0
 
-	for item in list_dir(source):
-		if item == "." or item == "..":
-			continue
+	for entry in _list_dir_entries(source):
+		var item := str(entry["name"])
 		var src_path = source.rstrip("/") + "/" + item
 		var dst_path = dest.rstrip("/") + "/" + item
-		if dir_exists(src_path):
+		if bool(entry["is_dir"]):
 			if not copy_dir(src_path, dst_path):
 				success = false
 				failed_count += 1
@@ -1140,6 +1171,19 @@ static func read_file_chunk(path: String, max_bytes: int) -> PackedByteArray:
 ## progress_callback(info: Dictionary) is called periodically with keys:
 ## extracted_files, total_files, extracted_bytes, total_bytes, total_estimated, current_file
 static func extract_archive(archive_path: String, extract_dir: String, progress_callback: Callable = Callable(), normalize_backslashes: bool = true) -> bool:
+	if extract_dir.is_empty():
+		return _extract_archive_unlocked(archive_path, extract_dir, progress_callback, normalize_backslashes)
+	# Serialize direct-to-live extractors as well as same-destination work.
+	# The destination is deliberately NOT registered as a cleanup artifact.
+	var operation_lock := OperationLifecycle.acquire(extract_dir, "extracting")
+	if operation_lock.is_empty():
+		push_error("[SystemManager.filesystem] Another extraction operation owns: " + extract_dir)
+		return false
+	var success := _extract_archive_unlocked(archive_path, extract_dir, progress_callback, normalize_backslashes)
+	OperationLifecycle.release(operation_lock)
+	return success
+
+static func _extract_archive_unlocked(archive_path: String, extract_dir: String, progress_callback: Callable = Callable(), normalize_backslashes: bool = true) -> bool:
 	if not file_exists(archive_path):
 		push_error("[SystemManager.filesystem] Archive file not found: " + archive_path)
 		return false
@@ -1775,6 +1819,14 @@ static func count_files_recursive(dir_path: String) -> int:
 	
 	return count
 
+## Move one entry whose destination parent is already present. Keep restricted
+## Android paths on the plugin route; direct paths can use the same rename syscall
+## as FSM.move() without repeating its parent-directory existence check.
+static func _move_extraction_entry(source_path: String, dest_path: String) -> bool:
+	if _is_restricted_android_path(source_path) or _is_restricted_android_path(dest_path):
+		return move(source_path, dest_path)
+	return DirAccess.rename_absolute(source_path, dest_path) == OK
+
 ## Moves all contents from source_dir to dest_dir
 ## Tries rename first (fast), falls back to copy+delete for cross-boundary moves
 ## Returns true on success
@@ -1791,16 +1843,14 @@ static func move_dir_contents(source_dir: String, dest_dir: String) -> bool:
 			push_error("[SystemManager.filesystem] Failed to create destination directory: " + dest_dir)
 			return false
 	
-	var items = list_dir(source_dir)
+	var items := _list_dir_entries(source_dir)
 	var moved_count = 0
 	
-	for item in items:
-		if item == "." or item == "..":
-			continue
-		
+	for entry in items:
+		var item := str(entry["name"])
 		var source = join_paths(source_dir, item)
 		var dest = join_paths(dest_dir, item)
-		if is_dir(source) and dir_exists(dest):
+		if bool(entry["is_dir"]) and dir_exists(dest):
 			# Android ROOT `mv source existing-dir` nests source inside the
 			# destination. Recurse and rename individual entries instead of
 			# copying the whole directory; copy remains each entry's fallback.
@@ -1811,14 +1861,16 @@ static func move_dir_contents(source_dir: String, dest_dir: String) -> bool:
 			moved_count += 1
 			continue
 		
-		# Try rename first (fast, same filesystem)
-		if move(source, dest):
+		# Try rename first (fast, same filesystem). The destination directory is
+		# already known to exist in this loop, so avoid repeating that check for
+		# every file on Android's FUSE-backed shared storage.
+		if _move_extraction_entry(source, dest):
 			moved_count += 1
 			continue
 		
 		# Rename failed - try copy+delete
 		if DEBUG_LOG: print("[SystemManager.filesystem] Rename failed for " + source + ", falling back to copy+delete...")
-		if file_exists(source):
+		if not bool(entry["is_dir"]):
 			if DEBUG_LOG: print("[SystemManager.filesystem] Copying file: " + source + " -> " + dest)
 			if not copy_file(source, dest):
 				push_error("[SystemManager.filesystem] Failed to copy file: " + source + " -> " + dest)
@@ -1828,7 +1880,7 @@ static func move_dir_contents(source_dir: String, dest_dir: String) -> bool:
 			if not del_success:
 				if DEBUG_LOG: print("[SystemManager.filesystem] WARNING: Failed to delete source file: " + source)
 			moved_count += 1
-		elif is_dir(source):
+		elif bool(entry["is_dir"]):
 			if DEBUG_LOG: print("[SystemManager.filesystem] Copying directory: " + source + " -> " + dest)
 			if not copy_dir(source, dest):
 				push_error("[SystemManager.filesystem] Failed to copy directory: " + source + " -> " + dest)
@@ -1856,7 +1908,8 @@ static func plan_extraction_layout(target_dir: String, options: Dictionary = {})
 		}
 	var entries: Array[Dictionary] = []
 	var unsafe_entries: Array = []
-	_collect_extraction_layout_entries(target_dir, "", 0, _extraction_scan_depth(options), entries, unsafe_entries)
+	var scan_state := {"truncated": false}
+	_collect_extraction_layout_entries(target_dir, "", 0, _extraction_scan_depth(options), entries, unsafe_entries, scan_state)
 	if not unsafe_entries.is_empty():
 		return {
 			"status": "unsafe_entry",
@@ -1865,8 +1918,12 @@ static func plan_extraction_layout(target_dir: String, options: Dictionary = {})
 			"matched_anchors": [],
 			"candidates": unsafe_entries,
 			"error": "Symbolic links are not supported inside extracted payloads",
+			"scan_complete": false,
 		}
-	return ExtractionLayout.plan(entries, options)
+	var result := ExtractionLayout.plan(entries, options)
+	result["scan_complete"] = not bool(scan_state["truncated"])
+	result["entries"] = entries
+	return result
 
 ## Normalizes an extracted payload according to a declarative layout policy.
 ## target_dir must contain only this operation's output (normally isolated
@@ -1889,15 +1946,41 @@ static func normalize_extraction_layout(target_dir: String, options: Dictionary 
 		result.error = "Extraction target does not exist or is not accessible: " + target_dir
 		return result
 
-	# Collect links and backslash-named entries in one bounded walk. No rename
-	# is attempted when any link is present in the scanned payload.
-	var linked_entries := _normalize_backslash_paths(target_dir, true, _extraction_scan_depth(options))
-	if not linked_entries.is_empty():
-		result.status = "unsafe_entry"
-		result.error = "Symbolic links are not supported inside extracted payloads"
-		result.candidates = linked_entries
-		return result
+	# Most payloads are already canonical. Prove that with a root-only plan
+	# before paying for deep backslash and wrapper discovery.
+	var direct_options := options.duplicate(true)
+	direct_options["max_depth"] = 0
+	direct_options["_scan_depth_override"] = 0
+	var direct := plan_extraction_layout(target_dir, direct_options)
+	if str(direct.get("status", "")) == ExtractionLayout.STATUS_ALREADY_CANONICAL:
+		var direct_needs_repair := false
+		for entry in direct.get("entries", []):
+			if str(entry.get("path", "")).contains("\\"):
+				direct_needs_repair = true
+				break
+		if not direct_needs_repair:
+			for key in direct:
+				result[key] = direct[key]
+			return result
+
+	# Discover the layout first. A complete ordinary snapshot already contains
+	# everything needed for planning, so do not walk every file a second time
+	# looking for backslash names that are not present. Truncated or backslash-
+	# containing snapshots retain the repair pass and a fresh plan below.
 	var layout := plan_extraction_layout(target_dir, options)
+	var needs_backslash_scan := not bool(layout.get("scan_complete", false))
+	for entry in layout.get("entries", []):
+		if str(entry.get("path", "")).contains("\\"):
+			needs_backslash_scan = true
+			break
+	if needs_backslash_scan:
+		var linked_entries := _normalize_backslash_paths(target_dir, true, _extraction_scan_depth(options))
+		if not linked_entries.is_empty():
+			result.status = "unsafe_entry"
+			result.error = "Symbolic links are not supported inside extracted payloads"
+			result.candidates = linked_entries
+			return result
+		layout = plan_extraction_layout(target_dir, options)
 	for key in layout:
 		result[key] = layout[key]
 	if result.status != ExtractionLayout.STATUS_HOIST:
@@ -1917,7 +2000,13 @@ static func normalize_extraction_layout(target_dir: String, options: Dictionary 
 	var collisions: Array = []
 	var unsafe_entries: Array = []
 	var type_collisions: Array = []
-	_collect_extraction_commit_conflicts(source_dir, target_dir, collisions, unsafe_entries, type_collisions)
+	var skip_conflicts := _can_skip_extraction_conflicts(target_dir, source_dir, relative_root)
+	if skip_conflicts and not bool(layout.get("scan_complete", false)):
+		_collect_extraction_symlinks(source_dir, "", unsafe_entries)
+	elif not skip_conflicts and bool(layout.get("scan_complete", false)):
+		_collect_extraction_commit_conflicts_from_snapshot(layout.get("entries", []), relative_root, target_dir, collisions, unsafe_entries, type_collisions)
+	elif not skip_conflicts:
+		_collect_extraction_commit_conflicts(source_dir, target_dir, collisions, unsafe_entries, type_collisions)
 	collisions.append_array(type_collisions)
 	if not unsafe_entries.is_empty():
 		result.status = "unsafe_entry"
@@ -1930,39 +2019,78 @@ static func normalize_extraction_layout(target_dir: String, options: Dictionary 
 		result.collisions = collisions
 		return result
 
-	if not move_dir_contents(source_dir, target_dir):
+	# The common one-wrapper case can be hoisted with two directory renames.
+	# Besides avoiding a file-by-file walk, this keeps large wrapped updates
+	# from paying for a second full move when they are committed afterwards.
+	# Restricted Android providers do not expose atomic directory swaps, so keep
+	# their established recursive move/rollback behavior.
+	var atomic_hoist := false
+	if skip_conflicts and not _is_restricted_android_path(target_dir) and not _is_restricted_android_path(source_dir):
+		var atomic_status := _try_atomic_single_wrapper_hoist(target_dir, source_dir, relative_root)
+		if atomic_status < 0:
+			result.status = "io_error"
+			result.error = "Failed to hoist extracted payload from " + source_dir + " to " + target_dir
+			return result
+		atomic_hoist = atomic_status > 0
+	if not atomic_hoist and not move_dir_contents(source_dir, target_dir):
 		result.status = "io_error"
 		result.error = "Failed to hoist extracted payload from " + source_dir + " to " + target_dir
 		return result
 
-	# Remove only empty wrapper directories. A wrapper containing unrelated or
-	# ignored archive content, and every ancestor above it, is left in place.
-	var current := source_dir
-	while normalize_path(current) != normalize_path(target_dir) and is_path_contained(current, target_dir):
-		if not list_dir(current).is_empty():
-			break
-		if not delete_dir_recursive(current):
-			break
-		current = current.get_base_dir()
+	if not atomic_hoist:
+		# Remove only empty wrapper directories. A wrapper containing unrelated or
+		# ignored archive content, and every ancestor above it, is left in place.
+		var current := source_dir
+		while normalize_path(current) != normalize_path(target_dir) and is_path_contained(current, target_dir):
+			if not list_dir(current).is_empty():
+				break
+			if not delete_dir_recursive(current):
+				break
+			current = current.get_base_dir()
 
+	# The snapshot describes the tree before hoisting. Return paths relative to
+	# the new canonical root so a following merge can reuse it safely.
+	result["entries"] = _canonical_extraction_snapshot(result.get("entries", []), relative_root, target_dir)
 	result.status = "normalized"
 	result.moved = true
 	result.path = target_dir
 	print("[SystemManager.filesystem] Hoisted extraction payload from " + source_dir + " to " + target_dir)
 	return result
 
+static func _try_android_direct_merge(source_dir: String, dest_dir: String) -> Dictionary:
+	var plugin = _get_plugin()
+	if plugin == null:
+		return {"validated": false, "success": false}
+	var response_text := str(plugin.call("androidMergeDirect", source_dir, dest_dir))
+	var response: Variant = JSON.parse_string(response_text)
+	if not response is Dictionary:
+		return {"validated": false, "success": false}
+	return response
+
 ## Commits an already-normalized staging tree into a live destination. Existing
 ## real files are replaced (matching 7-Zip's update behavior), disjoint folders
 ## are merged, and symlink source/destination entries fail the whole preflight.
-static func merge_extraction_payload(source_dir: String, dest_dir: String) -> Dictionary:
+static func merge_extraction_payload(source_dir: String, dest_dir: String, source_safety_checked: bool = false, source_snapshot: Array = [], operation_token: Dictionary = {}) -> Dictionary:
+	if dest_dir.is_empty():
+		return _merge_extraction_payload_unlocked(source_dir, dest_dir, source_safety_checked, source_snapshot)
+	var operation_lock := OperationLifecycle.acquire(dest_dir, "commit_started", 0, [source_dir], operation_token)
+	if operation_lock.is_empty():
+		return {"status": "locked", "path": dest_dir, "source_path": source_dir, "error": "Another extraction operation owns this destination", "overwritten": [], "preserve_source": false, "recovery_path": ""}
+	var result := _merge_extraction_payload_unlocked(source_dir, dest_dir, source_safety_checked, source_snapshot)
+	OperationLifecycle.release(operation_lock)
+	return result
+
+static func _merge_extraction_payload_unlocked(source_dir: String, dest_dir: String, source_safety_checked: bool = false, source_snapshot: Array = []) -> Dictionary:
 	var result := {
 		"status": "io_error",
 		"path": dest_dir,
 		"source_path": source_dir,
 		"error": "",
 		"overwritten": [],
+		"preserve_source": false,
+		"recovery_path": "",
 	}
-	if source_dir.is_empty() or dest_dir.is_empty() or source_dir == dest_dir or not dir_exists(source_dir) or is_symlink(source_dir):
+	if source_dir.is_empty() or dest_dir.is_empty() or source_dir == dest_dir or not dir_exists(source_dir) or is_symlink(source_dir) or is_symlink(dest_dir):
 		result.error = "Invalid extraction commit source or destination"
 		return result
 	var destination_existed := dir_exists(dest_dir)
@@ -1970,10 +2098,32 @@ static func merge_extraction_payload(source_dir: String, dest_dir: String) -> Di
 		result.error = "Could not create extraction commit destination parent: " + dest_dir.get_base_dir()
 		return result
 
+	# On direct Android storage, let the plugin perform the same complete
+	# preflight and merge without thousands of GDScript/JNI boundary crossings.
+	# SAF/ROOT and any native validation rejection use the established path below.
+	if destination_existed and is_android() and not _is_restricted_android_path(source_dir) and not _is_restricted_android_path(dest_dir):
+		var native_merge := _try_android_direct_merge(source_dir, dest_dir)
+		if bool(native_merge.get("validated", false)):
+			if bool(native_merge.get("success", false)):
+				result.status = "committed"
+				result.overwritten = native_merge.get("overwritten", [])
+				return result
+			result.preserve_source = bool(native_merge.get("preserve_source", false))
+			result.recovery_path = str(native_merge.get("recovery_path", ""))
+			result.error = str(native_merge.get("error", "Native extraction merge failed"))
+			return result
+
 	var overwritten: Array = []
 	var unsafe_entries: Array = []
 	var type_collisions: Array = []
-	_collect_extraction_commit_conflicts(source_dir, dest_dir, overwritten, unsafe_entries, type_collisions)
+	if destination_existed and source_safety_checked and not source_snapshot.is_empty():
+		_collect_extraction_commit_conflicts_from_snapshot(source_snapshot, "", dest_dir, overwritten, unsafe_entries, type_collisions)
+	elif destination_existed:
+		_collect_extraction_commit_conflicts(source_dir, dest_dir, overwritten, unsafe_entries, type_collisions)
+	elif not source_safety_checked:
+		# No destination collision is possible. Only source safety is needed
+		# before the whole-root rename fast path.
+		_collect_extraction_symlinks(source_dir, "", unsafe_entries)
 	if not type_collisions.is_empty():
 		result.status = "collision"
 		result.error = "Cannot merge files and directories with conflicting types"
@@ -1985,6 +2135,23 @@ static func merge_extraction_payload(source_dir: String, dest_dir: String) -> Di
 		result.overwritten = unsafe_entries
 		return result
 	result.overwritten = overwritten
+	if not is_android() and destination_existed and source_safety_checked and not source_snapshot.is_empty():
+		var source_files := 0
+		for entry in source_snapshot:
+			if not bool(entry.get("is_dir", false)):
+				source_files += 1
+		if source_files > 64:
+			var destination_measure := _measure_extraction_destination(dest_dir)
+			if not bool(destination_measure.get("unsafe", true)) and source_files > maxi(64, int(destination_measure.get("files", 0)) * 2):
+				var swapped := _try_swap_extraction_merge(source_dir, dest_dir)
+				if bool(swapped.get("attempted", false)):
+					if bool(swapped.get("success", false)):
+						result.status = "committed"
+						return result
+					result.preserve_source = bool(swapped.get("preserve_source", false))
+					result.recovery_path = str(swapped.get("recovery_path", ""))
+					result.error = str(swapped.get("error", "Swap merge failed"))
+					return result
 	if not destination_existed and move(source_dir, dest_dir):
 		result.status = "committed"
 		return result
@@ -1999,10 +2166,117 @@ static func merge_extraction_payload(source_dir: String, dest_dir: String) -> Di
 	result.status = "committed"
 	return result
 
+static func _measure_extraction_destination(root_dir: String) -> Dictionary:
+	var pending: Array[String] = [""]
+	var files := 0
+	while not pending.is_empty():
+		var relative: String = pending.pop_back()
+		var current: String = root_dir if relative.is_empty() else join_paths(root_dir, relative)
+		var listed := _list_dir_entries_result(current)
+		if not bool(listed.get("ok", false)):
+			return {"files": files, "unsafe": true}
+		for entry in listed["entries"]:
+			if bool(entry["is_link"]):
+				return {"files": files, "unsafe": true}
+			var path := str(entry["name"]) if relative.is_empty() else relative + "/" + str(entry["name"])
+			if bool(entry["is_dir"]):
+				pending.append(path)
+			else:
+				files += 1
+	return {"files": files, "unsafe": false}
+
+## Swaps a large new payload into place, then restores only old-only entries.
+## Every moved old path is tracked so a failed merge can be reversed without
+## copying either tree. A false attempted result means in-place merge is safe.
+static func _try_swap_extraction_merge(source_dir: String, dest_dir: String) -> Dictionary:
+	if is_symlink(source_dir) or is_symlink(dest_dir):
+		return {"attempted": true, "success": false, "error": "Cannot swap merge a symbolic-link payload root"}
+	var backup_dir := join_paths(dest_dir.get_base_dir(), ".kyodai-merge-backup-" + dest_dir.get_file() + "-" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000))
+	if dir_exists(backup_dir) or file_exists(backup_dir):
+		return {"attempted": false, "success": false}
+	if not move(dest_dir, backup_dir):
+		return {"attempted": false, "success": false}
+	if not move(source_dir, dest_dir):
+		if move(backup_dir, dest_dir):
+			return {"attempted": false, "success": false}
+		return {"attempted": true, "success": false, "error": "New payload would not move into place; old payload is preserved at " + backup_dir}
+	var moved_old: Array[String] = []
+	var error := {"message": ""}
+	if not _move_missing_extraction_entries(backup_dir, dest_dir, "", moved_old, error):
+		var rollback := _rollback_swap_extraction_merge(source_dir, dest_dir, backup_dir, moved_old)
+		var message := str(error["message"])
+		var preserve_source := not bool(rollback.get("success", false))
+		var recovery_path := ""
+		if preserve_source:
+			recovery_path = _preserve_extraction_recovery_source(source_dir)
+			message += "; rollback failed: " + str(rollback.get("error", "")) + "; backup=" + backup_dir
+			if recovery_path != "":
+				message += "; mixed recovery tree=" + recovery_path
+		return {"attempted": true, "success": false, "error": message, "preserve_source": preserve_source, "recovery_path": recovery_path}
+	if dir_exists(backup_dir) and not delete_dir_recursive(backup_dir):
+		push_warning("[SystemManager.filesystem] Merge committed but backup cleanup failed: " + backup_dir)
+	return {"attempted": true, "success": true}
+
+static func _move_missing_extraction_entries(old_root: String, new_root: String, relative: String, moved_old: Array[String], error: Dictionary) -> bool:
+	var listed := _list_dir_entries_result(old_root)
+	if not bool(listed.get("ok", false)):
+		error["message"] = "Could not list old payload directory: " + old_root
+		return false
+	for entry in listed["entries"]:
+		var name := str(entry["name"])
+		var child_relative := name if relative.is_empty() else relative + "/" + name
+		var source := join_paths(old_root, name)
+		var target := join_paths(new_root, name)
+		if not dir_exists(target) and not file_exists(target):
+			if not move(source, target):
+				error["message"] = "Could not restore old-only entry: " + source
+				return false
+			moved_old.append(child_relative)
+		elif bool(entry["is_dir"]) and dir_exists(target):
+			if not _move_missing_extraction_entries(source, target, child_relative, moved_old, error):
+				return false
+	return true
+
+static func _rollback_swap_extraction_merge(source_dir: String, dest_dir: String, backup_dir: String, moved_old: Array[String]) -> Dictionary:
+	if not move(dest_dir, source_dir):
+		return {"success": false, "error": "could not move new payload back to staging"}
+	var success := true
+	var errors: Array[String] = []
+	for index in range(moved_old.size() - 1, -1, -1):
+		var relative := moved_old[index]
+		if not move(join_paths(source_dir, relative), join_paths(backup_dir, relative)):
+			success = false
+			errors.append(relative)
+	if not move(backup_dir, dest_dir):
+		success = false
+		errors.append("old payload root")
+	return {"success": success, "error": ", ".join(errors)}
+
+## Move a mixed new/old tree away from the normal staging cleanup path after a
+## failed rollback. The returned flag still instructs callers not to delete the
+## original path if this best-effort rename itself fails.
+static func _preserve_extraction_recovery_source(source_dir: String) -> String:
+	if not dir_exists(source_dir):
+		return ""
+	var recovery := source_dir + ".recovery-" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000)
+	if move(source_dir, recovery):
+		return recovery
+	return ""
+
 ## Replaces one owned payload root (for example a per-title game directory)
 ## instead of merging into it. The source and destination should be siblings on
 ## the same filesystem so commit uses rename instead of a partial-copy fallback.
-static func replace_extraction_payload(source_dir: String, dest_dir: String, keep_backup: bool = false) -> Dictionary:
+static func replace_extraction_payload(source_dir: String, dest_dir: String, keep_backup: bool = false, operation_token: Dictionary = {}) -> Dictionary:
+	if dest_dir.is_empty():
+		return _replace_extraction_payload_unlocked(source_dir, dest_dir, keep_backup)
+	var operation_lock := OperationLifecycle.acquire(dest_dir, "commit_started", 0, [source_dir], operation_token)
+	if operation_lock.is_empty():
+		return {"status": "locked", "path": dest_dir, "source_path": source_dir, "backup_path": "", "error": "Another extraction operation owns this destination"}
+	var result := _replace_extraction_payload_unlocked(source_dir, dest_dir, keep_backup)
+	OperationLifecycle.release(operation_lock)
+	return result
+
+static func _replace_extraction_payload_unlocked(source_dir: String, dest_dir: String, keep_backup: bool = false) -> Dictionary:
 	var result := {
 		"status": "io_error",
 		"path": dest_dir,
@@ -2150,6 +2424,8 @@ static func normalize_extraction_root(target_dir: String, expected_names: Array,
 	})
 
 static func _extraction_scan_depth(options: Dictionary) -> int:
+	if options.has("_scan_depth_override"):
+		return maxi(0, int(options["_scan_depth_override"]))
 	var scan_depth := maxi(1, int(options.get("max_depth", 3)))
 	for group in ["expected_any", "expected_all"]:
 		for anchor in options.get(group, []):
@@ -2157,20 +2433,20 @@ static func _extraction_scan_depth(options: Dictionary) -> int:
 			scan_depth = maxi(scan_depth, int(options.get("max_depth", 3)) + maxi(1, anchor_path.get_slice_count("/")))
 	return scan_depth
 
-static func _collect_extraction_layout_entries(root_dir: String, relative_dir: String, depth: int, max_depth: int, out: Array[Dictionary], unsafe_entries: Array) -> void:
+static func _collect_extraction_layout_entries(root_dir: String, relative_dir: String, depth: int, max_depth: int, out: Array[Dictionary], unsafe_entries: Array, scan_state: Dictionary) -> void:
 	var current_dir := root_dir if relative_dir == "" else join_paths(root_dir, relative_dir)
-	for entry in list_dir(current_dir):
-		if entry == "." or entry == "..":
-			continue
-		var relative_path := entry if relative_dir == "" else relative_dir + "/" + entry
-		var full_path := join_paths(root_dir, relative_path)
-		if is_symlink(full_path):
+	for entry in _list_dir_entries(current_dir):
+		var name := str(entry["name"])
+		var relative_path := name if relative_dir == "" else relative_dir + "/" + name
+		if bool(entry["is_link"]):
 			unsafe_entries.append(relative_path)
 			continue
-		var directory := is_dir(full_path)
-		out.append({"path": relative_path, "is_dir": directory})
+		var directory := bool(entry["is_dir"])
+		out.append({"path": relative_path, "is_dir": directory, "is_link": bool(entry["is_link"])})
 		if directory and depth < max_depth:
-			_collect_extraction_layout_entries(root_dir, relative_path, depth + 1, max_depth, out, unsafe_entries)
+			_collect_extraction_layout_entries(root_dir, relative_path, depth + 1, max_depth, out, unsafe_entries, scan_state)
+		elif directory:
+			scan_state["truncated"] = true
 
 static func extraction_tree_has_symlinks(root_dir: String) -> bool:
 	if root_dir.is_empty() or not dir_exists(root_dir):
@@ -2181,26 +2457,126 @@ static func extraction_tree_has_symlinks(root_dir: String) -> bool:
 
 static func _collect_extraction_symlinks(root_dir: String, relative_dir: String, out: Array) -> void:
 	var current_dir := root_dir if relative_dir == "" else join_paths(root_dir, relative_dir)
-	for entry in list_dir(current_dir):
-		if entry == "." or entry == "..":
-			continue
-		var relative_path := entry if relative_dir == "" else relative_dir + "/" + entry
-		var full_path := join_paths(root_dir, relative_path)
-		if is_symlink(full_path):
+	for entry in _list_dir_entries(current_dir):
+		var relative_path := str(entry["name"]) if relative_dir == "" else relative_dir + "/" + str(entry["name"])
+		if bool(entry["is_link"]):
 			out.append(relative_path)
-		elif is_dir(full_path):
+		elif bool(entry["is_dir"]):
 			_collect_extraction_symlinks(root_dir, relative_path, out)
 
+static func _collect_extraction_commit_conflicts_from_snapshot(entries: Array, source_root: String, target_dir: String, collisions: Array, unsafe_entries: Array, type_collisions: Array, case_insensitive: bool = false) -> void:
+	var prefix := source_root + "/" if source_root != "" else ""
+	var fold_case := case_insensitive or OS.get_name() == "Windows" or OS.get_name() == "macOS"
+	var destination_listings := {}
+	for source_entry in entries:
+		var path := str(source_entry.get("path", ""))
+		if (source_root != "" and path == source_root) or (prefix != "" and not path.begins_with(prefix)):
+			continue
+		var destination_rel := path.substr(prefix.length())
+		if destination_rel.is_empty():
+			continue
+		if bool(source_entry.get("is_link", false)):
+			unsafe_entries.append(join_paths(target_dir, path))
+			continue
+		var destination := join_paths(target_dir, destination_rel)
+		var parent := destination.get_base_dir()
+		if not destination_listings.has(parent):
+			var listing := {}
+			for item in _list_dir_entries(parent):
+				var item_name := str(item["name"])
+				listing[item_name.to_lower() if fold_case else item_name] = item
+			destination_listings[parent] = listing
+		var destination_name := destination.get_file()
+		var destination_entry: Dictionary = destination_listings[parent].get(destination_name.to_lower() if fold_case else destination_name, {})
+		if destination_entry.is_empty():
+			continue
+		if bool(destination_entry.get("is_link", false)):
+			unsafe_entries.append(destination)
+			continue
+		if bool(source_entry.get("is_dir", false)) != bool(destination_entry.get("is_dir", false)):
+			type_collisions.append(destination)
+		elif not bool(source_entry.get("is_dir", false)):
+			collisions.append(destination)
+
+## Returns 1 after a successful swap, 0 when the fast path was not attempted,
+## and -1 after a failed attempt (including a failed rollback). The caller must
+## not fall back after -1 because the original tree may need manual recovery.
+static func _try_atomic_single_wrapper_hoist(target_dir: String, source_dir: String, relative_root: String) -> int:
+	if target_dir.is_empty() or source_dir.is_empty() or relative_root.is_empty() or relative_root.contains("/"):
+		return 0
+	var parent := target_dir.get_base_dir()
+	if parent.is_empty():
+		return 0
+	var temporary := join_paths(parent, ".kyodai-hoist-" + target_dir.get_file() + "-" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000))
+	if dir_exists(temporary) or file_exists(temporary):
+		return 0
+	# Move the empty staging root aside first. The payload remains below the
+	# temporary sibling until the second rename puts it at the canonical path.
+	if not move(target_dir, temporary):
+		return 0
+	var temporary_payload := join_paths(temporary, relative_root)
+	if move(temporary_payload, target_dir):
+		# The old root is now empty by construction. Do not recursively remove a
+		# nonempty directory if a provider unexpectedly preserved extra content.
+		if dir_exists(temporary) and list_dir(temporary).is_empty():
+			delete_dir_recursive(temporary)
+		return 1
+	# Best-effort restoration keeps the original staging tree discoverable.
+	if not move(temporary, target_dir):
+		push_error("[SystemManager.filesystem] Could not roll back atomic extraction hoist; staging preserved at " + temporary)
+		return -1
+	return -1
+
+## Converts pre-hoist snapshot paths to the canonical staging root. Entries
+## outside the selected wrapper are retained because normalization deliberately
+## preserves unrelated root content.
+static func _canonical_extraction_snapshot(entries: Array, payload_root: String, target_dir: String) -> Array:
+	if payload_root.is_empty():
+		return entries
+	var removed_ancestors := {}
+	var ancestor := payload_root.get_base_dir()
+	while not ancestor.is_empty() and ancestor != ".":
+		if not dir_exists(join_paths(target_dir, ancestor)):
+			removed_ancestors[ancestor] = true
+		ancestor = ancestor.get_base_dir()
+	var prefix := payload_root + "/"
+	var canonical: Array = []
+	for original in entries:
+		var path := str(original.get("path", ""))
+		if path == payload_root or removed_ancestors.has(path):
+			continue
+		var entry: Dictionary = original.duplicate(true)
+		if path.begins_with(prefix):
+			entry["path"] = path.substr(prefix.length())
+		canonical.append(entry)
+	return canonical
+
+static func _can_skip_extraction_conflicts(target_dir: String, source_dir: String, relative_root: String) -> bool:
+	if relative_root.contains("/"):
+		return false
+	var root_entries := _list_dir_entries(target_dir)
+	if root_entries.size() != 1 or str(root_entries[0]["name"]) != relative_root or not bool(root_entries[0]["is_dir"]):
+		return false
+	# A same-named source item would collide with the wrapper itself.
+	for entry in _list_dir_entries(source_dir):
+		if str(entry["name"]) == relative_root:
+			return false
+	return true
+
 static func _collect_extraction_commit_conflicts(source_dir: String, dest_dir: String, collisions: Array, unsafe_entries: Array, type_collisions: Array) -> void:
-	for item in list_dir(source_dir):
-		if item == "." or item == "..":
+	var link_cache := {}
+	for entry in _list_dir_entries(source_dir):
+		var name := str(entry["name"])
+		var source := join_paths(source_dir, name)
+		var destination := join_paths(dest_dir, name)
+		if bool(entry["is_link"]):
+			unsafe_entries.append(source)
 			continue
-		var source := join_paths(source_dir, item)
-		var destination := join_paths(dest_dir, item)
-		if is_symlink(source) or is_symlink(destination):
-			unsafe_entries.append(source if is_symlink(source) else destination)
+		var destination_exists := dir_exists(destination) or file_exists(destination)
+		if destination_exists and _is_symlink_cached(destination, link_cache):
+			unsafe_entries.append(destination)
 			continue
-		if is_dir(source):
+		if bool(entry["is_dir"]):
 			if dir_exists(destination):
 				_collect_extraction_commit_conflicts(source, destination, collisions, unsafe_entries, type_collisions)
 			elif file_exists(destination):
@@ -2212,6 +2588,15 @@ static func _collect_extraction_commit_conflicts(source_dir: String, dest_dir: S
 			type_collisions.append(destination)
 		elif file_exists(destination):
 			collisions.append(destination)
+
+static func _is_symlink_cached(path: String, cache: Dictionary) -> bool:
+	if _is_restricted_android_path(path):
+		return false
+	var parent_path := path.get_base_dir()
+	if not cache.has(parent_path):
+		cache[parent_path] = DirAccess.open(parent_path)
+	var parent: DirAccess = cache[parent_path]
+	return parent != null and parent.is_link(path.get_file())
 
 ## Renames files and directories extracted with Windows-style backslash path
 ## separators into real nested directories. Some archives (often firmware dumps
@@ -2310,14 +2695,13 @@ static func _normalize_backslash_collect(full_path: String, rel_path: String, de
 
 	# Recurse even for backslash-named directories; children must be moved out
 	# before the parent can be removed/renamed. Links are reported, never followed.
-	for entry in list_dir(full_path):
-		if entry == "." or entry == "..":
-			continue
-		var child_path := join_paths(full_path, entry)
-		if is_symlink(child_path):
+	for entry in _list_dir_entries(full_path):
+		var name := str(entry["name"])
+		var child_path := join_paths(full_path, name)
+		if bool(entry["is_link"]):
 			linked_entries.append(child_path)
 			continue
-		var child_rel := entry if rel_path == "" else rel_path + "\\" + entry
+		var child_rel := name if rel_path == "" else rel_path + "\\" + name
 		_normalize_backslash_collect(child_path, child_rel, depth + 1, out, linked_entries, max_depth)
 
 ## OS-level rename that preserves literal backslashes in filenames. Godot's

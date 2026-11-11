@@ -12,6 +12,7 @@ trap 'rm -rf "$test_root"' EXIT
 
 mkdir -p \
   "$test_root/utils" \
+  "$test_root/utils/sync" \
   "$test_root/managers/system_manager" \
   "$test_root/base_class/abstract" \
   "$test_root/data" \
@@ -20,6 +21,7 @@ mkdir -p \
   "$test_root/xdg-config"
 
 ln -s "$repo_root/utils/filesystem" "$test_root/utils/filesystem"
+ln -s "$repo_root/utils/sync/content_hash.gd" "$test_root/utils/sync/content_hash.gd"
 ln -s "$repo_root/data/emulators" "$test_root/data/emulators"
 ln -s "$repo_root/managers/system_manager/filesystem_sub_manager.gd" "$test_root/managers/system_manager/filesystem_sub_manager.gd"
 ln -s "$repo_root/base_class/abstract/manager.gd" "$test_root/base_class/abstract/manager.gd"

@@ -1,6 +1,7 @@
 extends RefCounted
 
 const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
+const OperationLifecycle = preload("res://utils/filesystem/operation_lifecycle.gd")
 
 const BARE_CONTENTS := "bare_contents"
 const NAMED_ROOT := "named_root"
@@ -114,7 +115,7 @@ static func restore_staged_save(staging_dir: String, layout: Dictionary, fsm: GD
 	match str(layout.get("commit", "")):
 		COMMIT_REPLACE:
 			var source_root := named_source_root if kind == NAMED_ROOT else staging_dir
-			var replaced: Dictionary = fsm.replace_extraction_payload(source_root, str(layout["commit_root"]))
+			var replaced: Dictionary = fsm.replace_extraction_payload(source_root, str(layout["commit_root"]), false, layout.get("_operation_token", {}))
 			if str(replaced.get("status", "")) != "replaced":
 				return {"success": false, "error": str(replaced.get("error", "replacement failed"))}
 		COMMIT_MERGE:
@@ -123,46 +124,161 @@ static func restore_staged_save(staging_dir: String, layout: Dictionary, fsm: GD
 			if not backup.get("success", false):
 				return {"success": false, "error": str(backup.get("error", "backup failed"))}
 			var backup_path := str(backup.get("backup_path", ""))
-			var merged: Dictionary = fsm.merge_extraction_payload(staging_dir, commit_root)
+			var merged: Dictionary = fsm.merge_extraction_payload(staging_dir, commit_root, false, [], layout.get("_operation_token", {}))
 			if str(merged.get("status", "")) != "committed":
 				var rollback_ok := true
 				if backup_path == "" and fsm.dir_exists(commit_root):
 					rollback_ok = fsm.delete_dir_recursive(commit_root)
 				elif not fsm.restore_extraction_backup(backup_path, commit_root):
 					rollback_ok = false
-				return {"success": false, "error": str(merged.get("error", "merge failed")), "rollback_ok": rollback_ok, "backup_path": backup_path}
+				return {"success": false, "error": str(merged.get("error", "merge failed")), "rollback_ok": rollback_ok, "backup_path": backup_path, "preserve_source": bool(merged.get("preserve_source", false)), "recovery_path": str(merged.get("recovery_path", ""))}
 			fsm.delete_extraction_backup(backup_path)
 		COMMIT_REPLACE_COMPONENTS:
-			var committed: Array = []
+			var replacements: Array = []
 			for component in components:
-				var destination: String = fsm.join_paths(str(layout["commit_root"]), str(component["name"]))
-				var replaced: Dictionary = fsm.replace_extraction_payload(str(component["source"]), destination, true)
-				var backup_path := str(replaced.get("backup_path", ""))
-				if str(replaced.get("status", "")) != "replaced":
-					# replace_extraction_payload already attempted this component's
-					# own rollback. Do not delete its restored live payload; only
-					# previously successful components participate in outer rollback.
-					var rollback := _rollback_components(committed, fsm)
-					var failed_backups: Array = rollback.get("failed_backups", [])
-					var rollback_ok := bool(rollback.get("rollback_ok", false))
-					if backup_path != "":
-						rollback_ok = false
-						failed_backups.append(backup_path)
-					return {
-						"success": false,
-						"error": str(replaced.get("error", "component replacement failed")),
-						"rollback_ok": rollback_ok,
-						"failed_backups": failed_backups,
-					}
-				committed.append({"backup_path": backup_path, "destination": destination})
-			for prior in committed:
-				fsm.delete_extraction_backup(str(prior["backup_path"]))
+				replacements.append({
+					"source": str(component["source"]),
+					"destination": fsm.join_paths(str(layout["commit_root"]), str(component["name"])),
+				})
+			var transaction := replace_components_transaction(replacements, fsm, layout.get("_operation_token", {}))
+			if not bool(transaction.get("success", false)):
+				return transaction
 		_:
 			return {"success": false, "error": "unsupported save commit policy"}
 
 	if kind != MULTI_ROOT and not _folder_has_payload(str(layout["commit_root"]), fsm):
 		return {"success": false, "error": "restored save is missing or empty"}
 	return {"success": true, "error": ""}
+
+## Replaces every supplied component as one transaction. Destinations not in
+## this list are never touched. Each successful replacement retains its backup
+## until all components commit; any failure rolls back earlier components and
+## the failed component's own replacement primitive handles its live tree.
+static func replace_components_transaction(components: Array, fsm: GDScript, operation_token: Dictionary = {}) -> Dictionary:
+	var committed: Array = []
+	for component in components:
+		var destination := str(component["destination"])
+		var replaced: Dictionary = fsm.replace_extraction_payload(str(component["source"]), destination, true, operation_token)
+		var backup_path := str(replaced.get("backup_path", ""))
+		if str(replaced.get("status", "")) != "replaced":
+			var rollback := _rollback_components(committed, fsm)
+			var failed_backups: Array = rollback.get("failed_backups", [])
+			var rollback_ok := bool(rollback.get("rollback_ok", false))
+			if backup_path != "":
+				rollback_ok = false
+				failed_backups.append(backup_path)
+			return {
+				"success": false,
+				"error": str(replaced.get("error", "component replacement failed")),
+				"rollback_ok": rollback_ok,
+				"failed_backups": failed_backups,
+			}
+		committed.append({"backup_path": backup_path, "destination": destination})
+	for prior in committed:
+		fsm.delete_extraction_backup(str(prior["backup_path"]))
+	return {"success": true, "error": ""}
+
+## Stages and restores one routed 3DS archive. Only archive-present components
+## are replaced; the other component and all explicit empty directories survive.
+static func unpack_3ds_archive(zip_path: String, data_dest: String, extdata_dest: String, fsm: GDScript, operation_token: Dictionary = {}) -> bool:
+	var data_stage := GameExtraction.staging_path(data_dest)
+	var extdata_stage := GameExtraction.staging_path(extdata_dest)
+	if not operation_token.is_empty():
+		OperationLifecycle.track_artifact(operation_token, data_stage)
+		OperationLifecycle.track_artifact(operation_token, extdata_stage)
+	var zr := ZIPReader.new()
+	if zr.open(zip_path) != OK:
+		return false
+	var ops: Array = []
+	var destinations := {}
+	var has_data := false
+	var has_extdata := false
+	var valid := true
+	for entry in zr.get_files():
+		var is_dir := entry.ends_with("/")
+		var rel := entry.rstrip("/")
+		var root := rel.get_slice("/", 0)
+		var base := ""
+		match root:
+			"data":
+				base = data_stage
+				has_data = true
+			"extdata":
+				base = extdata_stage
+				has_extdata = true
+			_:
+				push_error("[SaveLayout] 3DS archive has unknown root '" + root + "'")
+				valid = false
+				break
+		var sub := rel.substr(root.length() + 1)
+		var dest := base if sub == "" else base + "/" + sub
+		if not fsm.is_path_contained(dest, base):
+			push_error("[SaveLayout] 3DS archive entry escapes its component: " + entry)
+			valid = false
+			break
+		if destinations.has(dest):
+			# ZIP writers may repeat directory metadata. It is idempotent; file
+			# duplicates and file/directory conflicts remain fatal.
+			if is_dir and bool(destinations[dest]):
+				continue
+			push_error("[SaveLayout] 3DS archive has duplicate or conflicting destination: " + entry)
+			valid = false
+			break
+		destinations[dest] = is_dir
+		ops.append({"entry": entry, "dest": dest, "is_dir": is_dir})
+	if not valid or ops.is_empty():
+		if ops.is_empty():
+			push_error("[SaveLayout] 3DS archive contains no routed components")
+		zr.close()
+		return false
+	if has_data and not fsm.make_dir_recursive(data_stage):
+		_cleanup_3ds_staging(data_stage, fsm)
+		_cleanup_3ds_staging(extdata_stage, fsm)
+		zr.close()
+		return false
+	if has_extdata and not fsm.make_dir_recursive(extdata_stage):
+		_cleanup_3ds_staging(data_stage, fsm)
+		_cleanup_3ds_staging(extdata_stage, fsm)
+		zr.close()
+		return false
+	var ok := true
+	for op in ops:
+		if op["is_dir"]:
+			if not fsm.make_dir_recursive(op["dest"]):
+				ok = false
+				break
+		else:
+			if not fsm.make_dir_recursive(op["dest"].get_base_dir()) or not fsm.write_file_bytes(op["dest"], zr.read_file(op["entry"])):
+				push_error("[SaveLayout] Could not stage 3DS entry: " + str(op["entry"]))
+				ok = false
+				break
+	zr.close()
+	if not ok:
+		_cleanup_3ds_staging(data_stage, fsm)
+		_cleanup_3ds_staging(extdata_stage, fsm)
+		return false
+
+	var replacements: Array = []
+	if has_data:
+		replacements.append({"source": data_stage, "destination": data_dest})
+	if has_extdata:
+		replacements.append({"source": extdata_stage, "destination": extdata_dest})
+	var transaction := replace_components_transaction(replacements, fsm, operation_token)
+	_cleanup_3ds_staging(data_stage, fsm)
+	_cleanup_3ds_staging(extdata_stage, fsm)
+	if not bool(transaction.get("success", false)):
+		push_error("[SaveLayout] 3DS save transaction failed: " + str(transaction.get("error", "unknown error")))
+		for backup in transaction.get("failed_backups", []):
+			push_warning("[SaveLayout] 3DS recovery backup retained at " + str(backup))
+	return bool(transaction.get("success", false))
+
+static func _cleanup_3ds_staging(path: String, fsm: GDScript) -> void:
+	if path.is_empty() or not GameExtraction.is_staging_path(path) or not fsm.dir_exists(path):
+		return
+	if fsm.extraction_tree_has_symlinks(path):
+		push_warning("[SaveLayout] Leaving unsafe 3DS staging in place: " + path)
+		return
+	fsm.delete_dir_recursive(path)
 
 static func _folder_has_payload(path: String, fsm: GDScript) -> bool:
 	return fsm.dir_exists(path) and fsm.count_files_recursive(path) > 0

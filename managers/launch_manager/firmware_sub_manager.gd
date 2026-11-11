@@ -296,8 +296,12 @@ func _finish_firmware_extract(extract_success: bool, error_msg: String, firmware
 	# Server zips sometimes wrap the payload in folder(s) (e.g. bios/). Locate
 	# and hoist the expected payload before reporting the install as successful.
 	var expected := get_platform_firmware_expected_files(platform_slug)
+	var scan_complete := false
+	var snapshot: Array = []
 	if not expected.is_empty():
 		var norm: Dictionary = FSM.normalize_extraction_root(staging_dir, expected)
+		scan_complete = bool(norm.get("scan_complete", false))
+		snapshot = norm.get("entries", [])
 		var status := str(norm.get("status", ""))
 		if not ["normalized", "already_canonical"].has(status):
 			var message := "Downloaded firmware does not contain a usable expected layout: " + str(norm.get("error", status))
@@ -312,10 +316,13 @@ func _finish_firmware_extract(extract_success: bool, error_msg: String, firmware
 			print("[FirmwareManager] Hoisted firmware payload " + str(norm.get("depth", 0)) + " level(s) inside isolated staging")
 
 	# Only the isolated, validated payload enters the live firmware tree.
-	var commit := FSM.merge_extraction_payload(staging_dir, firmware_dir)
+	var commit := FSM.merge_extraction_payload(staging_dir, firmware_dir, scan_complete, snapshot)
 	if str(commit.get("status", "")) != "committed":
 		var message := "Could not commit extracted firmware: " + str(commit.get("error", "unknown error"))
-		_cleanup_firmware_staging(staging_dir)
+		if bool(commit.get("preserve_source", false)):
+			push_warning("[FirmwareManager] Preserving extraction recovery data at " + str(commit.get("recovery_path", staging_dir)))
+		else:
+			_cleanup_firmware_staging(staging_dir)
 		clear_firmware_cache_for_platform(platform_slug)
 		push_error("[FirmwareManager] " + message)
 		launch_manager.firmware_download_completed.emit(platform_slug, false)

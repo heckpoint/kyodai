@@ -3177,6 +3177,362 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         return false;
     }
 
+    /**
+     * Validates and merges a direct-filesystem extraction tree in one call.
+     * Validation is completed before the first mutation. The returned
+     * "validated" flag tells GDScript whether it may safely use its fallback;
+     * a failure after validation must not trigger a second merge attempt.
+     */
+    @UsedByGodot
+    public String androidMergeDirect(String sourceRoot, String destRoot) {
+        long t0 = SafPerf.start();
+        java.util.ArrayList<String> overwritten = new java.util.ArrayList<>();
+        try {
+            File source = new File(sourceRoot == null ? "" : sourceRoot);
+            File destination = new File(destRoot == null ? "" : destRoot);
+            if (sourceRoot == null || destRoot == null
+                    || requiresDocumentsContract(sourceRoot) || requiresDocumentsContract(destRoot)
+                    || !directDirectory(source) || !directDirectory(destination)) {
+                return directMergeResult(false, false, 0, overwritten, "not a direct directory merge");
+            }
+            try {
+                if (android.system.Os.stat(sourceRoot).st_dev != android.system.Os.stat(destRoot).st_dev) {
+                    return directMergeResult(false, false, 0, overwritten, "different filesystems");
+                }
+            } catch (Exception statError) {
+                return directMergeResult(false, false, 0, overwritten, "cannot compare merge filesystems");
+            }
+            StringBuilder validationError = new StringBuilder();
+            int[] sourceFiles = new int[]{0};
+            if (!validateDirectMerge(source, destination, overwritten, validationError, sourceFiles)) {
+                return directMergeResult(false, false, 0, overwritten, validationError.toString());
+            }
+            int destinationFiles = countDirectFiles(destination);
+            if (destinationFiles < 0) {
+                return directMergeResult(false, false, 0, overwritten, "could not size direct merge trees");
+            }
+            if (sourceFiles[0] > Math.max(64, destinationFiles * 2)) {
+                if (!validateDirectSourceTree(destination, validationError, null)) {
+                    return directMergeResult(false, false, 0, overwritten, validationError.toString());
+                }
+                return swapDirectMerge(source, destination, overwritten);
+            }
+            int[] completed = new int[]{0};
+            StringBuilder moveError = new StringBuilder();
+            boolean success = moveDirectMerge(source, destination, completed, moveError);
+            return directMergeResult(success, true, completed[0], overwritten, moveError.toString());
+        } catch (Exception error) {
+            Log.w(TAG, "androidMergeDirect failed", error);
+            return directMergeResult(false, true, 0, overwritten, error.toString());
+        } finally {
+            SafPerf.record("androidMergeDirect", t0);
+        }
+    }
+
+    private boolean directDirectory(File file) {
+        try {
+            android.system.StructStat stat = android.system.Os.lstat(file.getAbsolutePath());
+            return (stat.st_mode & android.system.OsConstants.S_IFMT) == android.system.OsConstants.S_IFDIR;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    private boolean directExists(File file) {
+        try {
+            android.system.Os.lstat(file.getAbsolutePath());
+            return true;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    private boolean directSymlink(File file) {
+        try {
+            android.system.StructStat stat = android.system.Os.lstat(file.getAbsolutePath());
+            return (stat.st_mode & android.system.OsConstants.S_IFMT) == android.system.OsConstants.S_IFLNK;
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    private boolean validateDirectMerge(File source, File destination,
+            java.util.ArrayList<String> overwritten, StringBuilder error, int[] sourceFiles) {
+        if (directSymlink(source) || directSymlink(destination) || !directDirectory(source)) {
+            error.append("unsafe source or destination entry");
+            return false;
+        }
+        File[] children = source.listFiles();
+        if (children == null) {
+            error.append("cannot list source: ").append(source.getPath());
+            return false;
+        }
+        for (File child : children) {
+            if (directSymlink(child)) {
+                error.append("symbolic link in source: ").append(child.getPath());
+                return false;
+            }
+            File target = new File(destination, child.getName());
+            boolean childDirectory = directDirectory(child);
+            boolean targetExists = directExists(target);
+            boolean targetDirectory = targetExists && directDirectory(target);
+            if (targetExists && directSymlink(target)) {
+                error.append("symbolic link in destination: ").append(target.getPath());
+                return false;
+            }
+            if (childDirectory && targetExists && !targetDirectory) {
+                error.append("file/directory collision: ").append(target.getPath());
+                return false;
+            }
+            if (!childDirectory && targetDirectory) {
+                error.append("directory/file collision: ").append(target.getPath());
+                return false;
+            }
+            if (childDirectory) {
+                if (targetDirectory) {
+                    if (!validateDirectMerge(child, target, overwritten, error, sourceFiles)) return false;
+                } else if (!validateDirectSourceTree(child, error, sourceFiles)) {
+                    return false;
+                }
+            } else {
+                sourceFiles[0]++;
+                if (targetExists) overwritten.add(target.getPath());
+            }
+        }
+        return true;
+    }
+
+    private boolean validateDirectSourceTree(File source, StringBuilder error, int[] sourceFiles) {
+        if (directSymlink(source) || !directDirectory(source)) {
+            error.append("unsafe source entry: ").append(source.getPath());
+            return false;
+        }
+        File[] children = source.listFiles();
+        if (children == null) {
+            error.append("cannot list source: ").append(source.getPath());
+            return false;
+        }
+        for (File child : children) {
+            if (directSymlink(child)) {
+                error.append("symbolic link in source: ").append(child.getPath());
+                return false;
+            }
+            if (directDirectory(child)) {
+                if (!validateDirectSourceTree(child, error, sourceFiles)) return false;
+            } else if (sourceFiles != null) {
+                sourceFiles[0]++;
+            }
+        }
+        return true;
+    }
+
+    private boolean moveDirectMerge(File source, File destination, int[] completed, StringBuilder error) {
+        File[] children = source.listFiles();
+        if (children == null) {
+            error.append("cannot list source during merge: ").append(source.getPath());
+            return false;
+        }
+        for (File child : children) {
+            File target = new File(destination, child.getName());
+            if (directDirectory(child) && directDirectory(target)) {
+                if (!moveDirectMerge(child, target, completed, error)) return false;
+                if (!child.delete() && directExists(child)) {
+                    error.append("could not remove merged directory: ").append(child.getPath());
+                    return false;
+                }
+                continue;
+            }
+            try {
+                android.system.Os.rename(child.getAbsolutePath(), target.getAbsolutePath());
+                completed[0]++;
+            } catch (Exception exception) {
+                error.append("native rename failed: ").append(child.getPath())
+                        .append(" (").append(exception.toString()).append(")");
+                return false;
+            }
+        }
+        if (!source.delete() && directExists(source)) {
+            error.append("could not remove merged source: ").append(source.getPath());
+            return false;
+        }
+        return true;
+    }
+
+    private int countDirectFiles(File file) {
+        if (directSymlink(file)) return -1;
+        if (!directDirectory(file)) return directExists(file) ? 1 : 0;
+        File[] children = file.listFiles();
+        if (children == null) return -1;
+        int count = 0;
+        for (File child : children) {
+            int childCount = countDirectFiles(child);
+            if (childCount < 0) return -1;
+            count += childCount;
+        }
+        return count;
+    }
+
+    /** Large-source merge: two root renames plus old-only entries, rather than
+     *  one rename for every new file. The backup is not deleted until success. */
+    private String swapDirectMerge(File source, File destination,
+            java.util.ArrayList<String> overwritten) {
+        File parent = destination.getParentFile();
+        if (parent == null) {
+            return directMergeResult(false, false, 0, overwritten, "destination has no parent");
+        }
+        File backup = new File(parent, ".kyodai-merge-backup-" + destination.getName() + "-" + System.nanoTime());
+        if (directExists(backup)) {
+            return directMergeResult(false, false, 0, overwritten, "merge backup already exists");
+        }
+        try {
+            android.system.Os.rename(destination.getAbsolutePath(), backup.getAbsolutePath());
+        } catch (Exception error) {
+            return directMergeResult(false, false, 0, overwritten, "could not move old payload aside: " + error);
+        }
+        try {
+            android.system.Os.rename(source.getAbsolutePath(), destination.getAbsolutePath());
+        } catch (Exception error) {
+            StringBuilder rollbackError = new StringBuilder();
+            boolean restored = restoreDirectRoot(backup, destination, rollbackError);
+            return directMergeResult(false, true, 0, overwritten,
+                    "could not install new payload: " + error + "; rollback=" + restored + " " + rollbackError);
+        }
+
+        java.util.ArrayList<String> movedOld = new java.util.ArrayList<>();
+        StringBuilder mergeError = new StringBuilder();
+        if (!moveMissingDirect(backup, destination, "", movedOld, mergeError)) {
+            StringBuilder rollbackError = new StringBuilder();
+            boolean restored = rollbackDirectSwap(source, destination, backup, movedOld, rollbackError);
+            if (!restored) {
+                File recovery = preserveDirectRecoverySource(source);
+                String recoveryPath = recovery != null ? recovery.getAbsolutePath()
+                        : directDirectory(destination) ? destination.getAbsolutePath() : backup.getAbsolutePath();
+                return directMergeResult(false, true, movedOld.size(), overwritten,
+                        mergeError + "; rollback=false " + rollbackError
+                                + "; backup=" + backup.getAbsolutePath()
+                                + "; mixed recovery tree=" + recoveryPath,
+                        true, recoveryPath);
+            }
+            return directMergeResult(false, true, movedOld.size(), overwritten,
+                    mergeError + "; rollback=true " + rollbackError);
+        }
+        // Old conflicting versions stay in the backup until every old-only
+        // entry has been restored. Cleanup is best-effort after commit.
+        if (!deleteDirectTree(backup)) {
+            Log.w(TAG, "Committed direct merge but could not remove backup " + backup);
+        }
+        return directMergeResult(true, true, movedOld.size() + 2, overwritten, "");
+    }
+
+    private boolean moveMissingDirect(File oldRoot, File newRoot, String relative,
+            java.util.ArrayList<String> movedOld, StringBuilder error) {
+        File[] children = oldRoot.listFiles();
+        if (children == null) {
+            error.append("cannot list old payload: ").append(oldRoot.getPath());
+            return false;
+        }
+        for (File child : children) {
+            String childRelative = relative.isEmpty() ? child.getName() : relative + "/" + child.getName();
+            File target = new File(newRoot, child.getName());
+            if (!directExists(target)) {
+                try {
+                    android.system.Os.rename(child.getAbsolutePath(), target.getAbsolutePath());
+                    movedOld.add(childRelative);
+                } catch (Exception exception) {
+                    error.append("could not restore old-only entry: ").append(child.getPath())
+                            .append(" (").append(exception.toString()).append(")");
+                    return false;
+                }
+            } else if (directDirectory(child) && directDirectory(target)) {
+                if (!moveMissingDirect(child, target, childRelative, movedOld, error)) return false;
+            }
+            // A same-path old file is the superseded version. Leave it in the
+            // backup until the merge succeeds so rollback never loses it.
+        }
+        return true;
+    }
+
+    private boolean rollbackDirectSwap(File source, File destination, File backup,
+            java.util.ArrayList<String> movedOld, StringBuilder error) {
+        try {
+            android.system.Os.rename(destination.getAbsolutePath(), source.getAbsolutePath());
+        } catch (Exception exception) {
+            error.append("could not move new payload back to staging: ").append(exception.toString());
+            return false;
+        }
+        boolean success = true;
+        for (int i = movedOld.size() - 1; i >= 0; i--) {
+            String relative = movedOld.get(i);
+            try {
+                android.system.Os.rename(new File(source, relative).getAbsolutePath(),
+                        new File(backup, relative).getAbsolutePath());
+            } catch (Exception exception) {
+                success = false;
+                error.append("could not restore old-only entry ").append(relative)
+                        .append(": ").append(exception.toString());
+            }
+        }
+        return restoreDirectRoot(backup, destination, error) && success;
+    }
+
+    private File preserveDirectRecoverySource(File source) {
+        if (!directDirectory(source)) return null;
+        File recovery = new File(source.getParentFile(),
+                source.getName() + ".recovery-" + System.nanoTime());
+        try {
+            android.system.Os.rename(source.getAbsolutePath(), recovery.getAbsolutePath());
+            return recovery;
+        } catch (Exception error) {
+            Log.w(TAG, "Could not move failed merge recovery tree aside", error);
+            return null;
+        }
+    }
+
+    private boolean restoreDirectRoot(File backup, File destination, StringBuilder error) {
+        try {
+            android.system.Os.rename(backup.getAbsolutePath(), destination.getAbsolutePath());
+            return true;
+        } catch (Exception exception) {
+            error.append("could not restore old payload: ").append(exception.toString());
+            return false;
+        }
+    }
+
+    private boolean deleteDirectTree(File file) {
+        if (directSymlink(file)) return false;
+        if (directDirectory(file)) {
+            File[] children = file.listFiles();
+            if (children == null) return false;
+            for (File child : children) {
+                if (!deleteDirectTree(child)) return false;
+            }
+        }
+        return file.delete() || !directExists(file);
+    }
+
+    private String directMergeResult(boolean success, boolean validated, int completed,
+            java.util.ArrayList<String> overwritten, String error) {
+        return directMergeResult(success, validated, completed, overwritten, error, false, "");
+    }
+
+    private String directMergeResult(boolean success, boolean validated, int completed,
+            java.util.ArrayList<String> overwritten, String error,
+            boolean preserveSource, String recoveryPath) {
+        org.json.JSONObject result = new org.json.JSONObject();
+        try {
+            result.put("success", success);
+            result.put("validated", validated);
+            result.put("completed", completed);
+            result.put("error", error == null ? "" : error);
+            result.put("overwritten", new org.json.JSONArray(overwritten));
+            result.put("preserve_source", preserveSource);
+            result.put("recovery_path", recoveryPath == null ? "" : recoveryPath);
+        } catch (org.json.JSONException ignored) {
+            return "{\"success\":false,\"validated\":true,\"preserve_source\":true,\"error\":\"result encoding failed\"}";
+        }
+        return result.toString();
+    }
+
     /** True when the path exists and is a directory, via direct File access or
      *  the DocumentsContract MIME type for restricted paths. */
     private boolean isDirectoryPath(String path) {

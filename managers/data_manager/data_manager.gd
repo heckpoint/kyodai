@@ -1,6 +1,8 @@
 extends Manager
 
 const FSM := preload("res://managers/system_manager/filesystem_sub_manager.gd")
+const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
+const OperationLifecycle = preload("res://utils/filesystem/operation_lifecycle.gd")
 
 # DataManager - Public facade for data persistence and caching.
 # Delegates all work to child managers in the data_manager.tscn scene.
@@ -414,6 +416,17 @@ func delete_game_download(game: GameResource, callback: Callable = Callable(), f
 
 	var root_folder = get_setting("games_root_folder")
 	var root_path: String = root_folder.value if root_folder else "user://roms/"
+	var ps4_delete_lock: Dictionary = {}
+	if game.platform_slug == "ps4":
+		var owned_root := GameExtraction.ps4_owned_root(root_path + "/ps4", game.get_active_title_id())
+		if owned_root != "":
+			ps4_delete_lock = OperationLifecycle.acquire(owned_root, "cleanup")
+			if ps4_delete_lock.is_empty():
+				push_warning("[DataManager] Refusing to delete PS4 download while another operation owns " + owned_root)
+				SystemManager.notifications.show_notification("Wait for PS4 extraction to finish before deleting this game", SystemManager.notifications.Type.ERROR)
+				if callback.is_valid():
+					callback.call(false)
+				return false
 
 	# Sibling group (master + all sibling rows) for the group cache rebuild.
 	var group_ids: Array = [game.romm_id]
@@ -453,6 +466,8 @@ func delete_game_download(game: GameResource, callback: Callable = Callable(), f
 			delete_file_names.append(active_file_name)
 
 	if delete_ids.is_empty():
+		if not ps4_delete_lock.is_empty():
+			OperationLifecycle.release(ps4_delete_lock)
 		push_error("[DataManager] Cannot delete: empty file name")
 		if callback.is_valid():
 			callback.call(false)
@@ -482,12 +497,16 @@ func delete_game_download(game: GameResource, callback: Callable = Callable(), f
 			push_error("[DataManager] File still exists after deletion attempt: " + abs_path)
 
 	if not any_existed and not force_db_update:
+		if not ps4_delete_lock.is_empty():
+			OperationLifecycle.release(ps4_delete_lock)
 		push_error("[DataManager] No files found on disk for: " + game.title)
 		if callback.is_valid():
 			callback.call(false)
 		return false
 
 	if any_failed and not force_db_update:
+		if not ps4_delete_lock.is_empty():
+			OperationLifecycle.release(ps4_delete_lock)
 		# Leave the DB untouched so the rows still match what's on disk; the
 		# force dialog lets the user clear the entries anyway.
 		if callback.is_valid():
@@ -505,7 +524,9 @@ func delete_game_download(game: GameResource, callback: Callable = Callable(), f
 	print("[DataManager] delete_game_download: clearing variants " + str(delete_ids) + " of game " + game.title + " (romm_id=" + str(game.romm_id) + ")")
 
 	# Clean up extracted game files for platforms that extract during launch
-	LaunchManager.cleanup_extracted_game_files(game)
+	LaunchManager.cleanup_extracted_game_files(game, ps4_delete_lock)
+	if not ps4_delete_lock.is_empty():
+		OperationLifecycle.release(ps4_delete_lock)
 
 	# Persist to database and mirror the authoritative result in memory.
 	# reconcile_root lets the DB clear group siblings whose files are also

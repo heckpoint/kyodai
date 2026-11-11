@@ -8,8 +8,10 @@ const Layout = preload("res://utils/filesystem/extraction_layout.gd")
 const EmulatorExtraction = preload("res://utils/filesystem/emulator_extraction.gd")
 const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
 const SaveLayout = preload("res://utils/filesystem/save_layout.gd")
+const OperationLifecycle = preload("res://utils/filesystem/operation_lifecycle.gd")
 
 var FSM: GDScript
+var ContentHash: GDScript
 var _checks := 0
 var _failures := 0
 var _temp_root := ""
@@ -22,11 +24,15 @@ func _init() -> void:
 
 func _run() -> void:
 	FSM = load("res://managers/system_manager/filesystem_sub_manager.gd")
+	ContentHash = load("res://utils/sync/content_hash.gd")
 	_run_planner_tests()
 	_run_emulator_registry_tests()
 	_run_game_policy_tests()
 	_run_save_policy_tests()
 	_run_filesystem_tests()
+	_run_3ds_tests()
+	_run_content_hash_tests()
+	_run_lifecycle_tests()
 	if _temp_root != "" and FSM.dir_exists(_temp_root):
 		FSM.delete_dir_recursive(_temp_root)
 	print("[extraction-layout] %d/%d checks passed, %d failed" % [_checks - _failures, _checks, _failures])
@@ -118,6 +124,18 @@ func _run_game_policy_tests() -> void:
 	ps4 = GameExtraction.ps4_title_id_candidate("outer/CUSA11111/nested/CUSA22222/file")
 	_expect(str(ps4.get("title_id", "")) == "CUSA11111", "PS4 shallowest segment wins")
 
+	_expect(GameExtraction.ps4_title_id_is_valid("CUSA01130"), "PS4 strict cleanup TitleID accepted")
+	for invalid in ["", "cusa01130", "CUSA1234", "CUSA01130X", "../CUSA01130", "CUSA01130/other", "/CUSA01130"]:
+		_expect(not GameExtraction.ps4_title_id_is_valid(invalid), "PS4 cleanup TitleID rejected: " + invalid)
+	_expect(GameExtraction.ps4_owned_root("/games/ps4", "CUSA01130") == "/games/ps4/CUSA01130", "PS4 owned root is deterministic")
+	_expect(GameExtraction.ps4_owned_root("/games/ps4", "../CUSA01130") == "", "PS4 owned root rejects traversal")
+	var ps4_staging := GameExtraction.staging_path("/games/ps4/CUSA01130", "CUSA01130")
+	_expect(ps4_staging.get_file().begins_with(".kyodai-extract-CUSA01130-") and GameExtraction.is_staging_path(ps4_staging), "PS4 staging is title-scoped and recognized")
+	_expect(GameExtraction.ps4_artifact_owned(".kyodai-backup-CUSA01130-123_1", "CUSA01130"), "PS4 backup artifact matched")
+	_expect(GameExtraction.ps4_artifact_owned(".kyodai-hoist-.kyodai-extract-CUSA01130-123_1-456_2", "CUSA01130"), "PS4 hoist artifact matched")
+	_expect(not GameExtraction.ps4_artifact_owned(".kyodai-extract-CUSA01130X-123_1", "CUSA01130"), "PS4 artifact matching rejects prefix lookalike")
+	_expect(not GameExtraction.ps4_artifact_owned(".kyodai-extract-123_1", "CUSA01130"), "PS4 cleanup leaves anonymous legacy staging")
+
 	_expect(GameExtraction.is_ps3_disc_sfo_path("wrapper/Game/PS3_GAME/PARAM.SFO"), "PS3 archive disc SFO recognized")
 	_expect(not GameExtraction.is_ps3_disc_sfo_path("wrapper/Update/PARAM.SFO"), "PS3 decoy SFO is not authoritative")
 	var ps3 := GameExtraction.ps3_layout_from_sfo("wrapper/Game/PS3_GAME/PARAM.SFO")
@@ -200,6 +218,26 @@ func _run_filesystem_tests() -> void:
 		_expect_status("filesystem nested backslash repair", result, "normalized")
 		_expect(FSM.file_exists(backslash + "/bios.bin"), "nested backslash payload normalized and hoisted")
 
+		var root_backslash := _temp_root + "/root_backslash"
+		_expect(_write_literal(root_backslash + "/dc\\dc_boot.bin", "dreamcast"), "create root literal backslash fixture")
+		result = FSM.normalize_extraction_root(root_backslash, ["dc/dc_boot.bin"])
+		_expect_status("root backslash anchor repairs before canonical return", result, "already_canonical")
+		_expect(FSM.file_exists(root_backslash + "/dc/dc_boot.bin"), "root backslash anchor becomes physical nested path")
+
+		var dot_backslash := _temp_root + "/dot_backslash"
+		_expect(_write_literal(dot_backslash + "/.\\bios.bin", "bios"), "create dot-prefixed backslash fixture")
+		_expect(FSM.list_dir(dot_backslash).has(".\\bios.bin"), "dot-prefixed literal file is visible to directory listing")
+		result = FSM.normalize_extraction_root(dot_backslash, ["bios.bin"])
+		_expect_status("dot-prefixed backslash anchor repairs", result, "already_canonical")
+		_expect(FSM.file_exists(dot_backslash + "/bios.bin"), "dot-prefixed backslash becomes root anchor")
+
+		var mixed_backslash := _temp_root + "/mixed_backslash"
+		_write(mixed_backslash + "/bios.bin", "bios")
+		_expect(_write_literal(mixed_backslash + "/unrelated\\note.bin", "note"), "create unrelated root backslash fixture")
+		result = FSM.normalize_extraction_root(mixed_backslash, ["bios.bin"])
+		_expect_status("valid root anchor keeps canonical status after sibling repair", result, "already_canonical")
+		_expect(FSM.file_exists(mixed_backslash + "/unrelated/note.bin"), "canonical fast path repairs unrelated backslash entries")
+
 	var disjoint := _temp_root + "/disjoint"
 	_write(disjoint + "/wrapper/bios.bin", "new bios")
 	_write(disjoint + "/wrapper/dc/new.bin", "new")
@@ -232,9 +270,66 @@ func _run_filesystem_tests() -> void:
 	_write(emulator_live + "/Dolphin.exe", "old executable")
 	result = FSM.normalize_extraction_layout(emulator_staged, EmulatorExtraction.layout_options(emulator_config))
 	_expect_status("emulator wrapped update normalized in staging", result, "normalized")
-	commit = FSM.merge_extraction_payload(emulator_staged, emulator_live)
+	commit = FSM.merge_extraction_payload(emulator_staged, emulator_live, bool(result.get("scan_complete", false)), result.get("entries", []))
 	_expect_status("emulator wrapped update committed", commit, "committed")
 	_expect(_read(emulator_live + "/Dolphin.exe") == "new executable", "stale live executable cannot mask wrapped update")
+
+	var swap_staged := _temp_root + "/swap_staged"
+	var swap_live := _temp_root + "/swap_live"
+	_write(swap_staged + "/wrapper/Dolphin.exe", "new executable")
+	for index in range(70):
+		_write(swap_staged + "/wrapper/files/new_%02d.bin" % index, "new")
+	_write(swap_live + "/Dolphin.exe", "old executable")
+	_write(swap_live + "/profiles/old.ini", "preserved")
+	result = FSM.normalize_extraction_layout(swap_staged, EmulatorExtraction.layout_options(emulator_config))
+	_expect_status("large snapshot merge normalized", result, "normalized")
+	commit = FSM.merge_extraction_payload(swap_staged, swap_live, bool(result.get("scan_complete", false)), result.get("entries", []))
+	_expect_status("large snapshot merge committed", commit, "committed")
+	_expect(_read(swap_live + "/Dolphin.exe") == "new executable", "swap merge keeps new conflicting file")
+	_expect(FSM.file_exists(swap_live + "/files/new_69.bin") and _read(swap_live + "/profiles/old.ini") == "preserved", "swap merge restores old-only files")
+	_expect(not FSM.dir_exists(swap_staged), "swap merge consumes staging")
+
+	var multi_staged := _temp_root + "/multi_staged"
+	var multi_live := _temp_root + "/multi_live"
+	_write(multi_staged + "/outer/inner/Dolphin.exe", "new executable")
+	_write(multi_live + "/outer", "unrelated live file")
+	result = FSM.normalize_extraction_layout(multi_staged, EmulatorExtraction.layout_options(emulator_config))
+	_expect_status("multi-wrapper snapshot normalized", result, "normalized")
+	var snapshot_paths: Array = []
+	var snapshot_entries_exist := true
+	for entry in result.get("entries", []):
+		var relative := str(entry.get("path", ""))
+		snapshot_paths.append(relative)
+		if bool(entry.get("is_dir", false)):
+			snapshot_entries_exist = snapshot_entries_exist and FSM.dir_exists(multi_staged + "/" + relative)
+		else:
+			snapshot_entries_exist = snapshot_entries_exist and FSM.file_exists(multi_staged + "/" + relative)
+	_expect(snapshot_entries_exist, "multi-wrapper snapshot contains only entries that still exist")
+	_expect(not snapshot_paths.has("outer"), "deleted wrapper ancestor absent from commit snapshot")
+	commit = FSM.merge_extraction_payload(multi_staged, multi_live, bool(result.get("scan_complete", false)), result.get("entries", []))
+	_expect_status("deleted wrapper ancestor cannot cause phantom collision", commit, "committed")
+	_expect(_read(multi_live + "/outer") == "unrelated live file", "phantom wrapper collision does not affect unrelated live file")
+
+	var snapshot_staged := _temp_root + "/snapshot_staged"
+	var snapshot_live := _temp_root + "/snapshot_live"
+	_write(snapshot_staged + "/wrapper/Dolphin.exe", "new executable")
+	_write(snapshot_live + "/Dolphin.exe/old.bin", "directory collision")
+	result = FSM.normalize_extraction_layout(snapshot_staged, EmulatorExtraction.layout_options(emulator_config))
+	_expect_status("snapshot type collision normalized", result, "normalized")
+	commit = FSM.merge_extraction_payload(snapshot_staged, snapshot_live, bool(result.get("scan_complete", false)), result.get("entries", []))
+	_expect_status("snapshot preflight detects live type collision", commit, "collision")
+	_expect(FSM.file_exists(snapshot_staged + "/Dolphin.exe"), "snapshot collision leaves staged payload intact")
+	_expect(FSM.file_exists(snapshot_live + "/Dolphin.exe/old.bin"), "snapshot collision leaves live directory intact")
+
+	var case_live := _temp_root + "/case_live"
+	_write(case_live + "/foo/old.bin", "old")
+	var case_collisions: Array = []
+	var case_unsafe: Array = []
+	var case_types: Array = []
+	FSM._collect_extraction_commit_conflicts_from_snapshot([{"path": "Foo", "is_dir": false, "is_link": false}], "", case_live, case_collisions, case_unsafe, case_types, true)
+	_expect(case_types.size() == 1, "case-folded snapshot rejects file/directory collision")
+	_expect(case_unsafe.is_empty() and case_collisions.is_empty(), "case-folded type collision is not misreported as overwrite")
+	_expect(FSM.file_exists(case_live + "/foo/old.bin"), "case-folded preflight leaves old content intact")
 
 	var fresh_staged := _temp_root + "/fresh_staged"
 	var fresh_live := _temp_root + "/fresh_live"
@@ -253,6 +348,25 @@ func _run_filesystem_tests() -> void:
 	commit = FSM.replace_extraction_payload(app_staged, app_live)
 	_expect_status("game app payload replaced", commit, "replaced")
 	_expect(FSM.file_exists(app_live + "/sce_sys/param.sfo") and FSM.file_exists(app_live + "/eboot.bin"), "game app root contains direct anchors")
+
+	var ps4_games := _temp_root + "/ps4_games"
+	_write(ps4_games + "/CUSA01130/partial.bin", "partial")
+	_write(ps4_games + "/.kyodai-extract-CUSA01130-100_1/staged.bin", "staged")
+	_write(ps4_games + "/.kyodai-hoist-.kyodai-extract-CUSA01130-100_1-101_2/hoisted.bin", "hoisted")
+	_write(ps4_games + "/.kyodai-backup-CUSA01130-102_3/old.bin", "old")
+	_write(ps4_games + "/CUSA22222/keep.bin", "keep")
+	_write(ps4_games + "/.kyodai-backup-CUSA22222-103_4/keep.bin", "keep")
+	_write(ps4_games + "/.kyodai-extract-104_5/keep.bin", "keep")
+	_write(ps4_games + "/CUSA01130.zip", "archive")
+	_write(ps4_games + "/unrelated/keep.bin", "keep")
+	var ps4_cleanup: Dictionary = GameExtraction.cleanup_ps4_extracted_game(ps4_games, "CUSA01130", FSM)
+	_expect(bool(ps4_cleanup.get("success", false)), "PS4 owned cleanup succeeds")
+	_expect(not FSM.dir_exists(ps4_games + "/CUSA01130"), "PS4 cleanup removes incomplete owned root")
+	_expect(not FSM.dir_exists(ps4_games + "/.kyodai-extract-CUSA01130-100_1") and not FSM.dir_exists(ps4_games + "/.kyodai-hoist-.kyodai-extract-CUSA01130-100_1-101_2") and not FSM.dir_exists(ps4_games + "/.kyodai-backup-CUSA01130-102_3"), "PS4 cleanup removes title-tagged operation artifacts")
+	_expect(FSM.file_exists(ps4_games + "/CUSA22222/keep.bin") and FSM.file_exists(ps4_games + "/.kyodai-backup-CUSA22222-103_4/keep.bin") and FSM.file_exists(ps4_games + "/.kyodai-extract-104_5/keep.bin") and FSM.file_exists(ps4_games + "/CUSA01130.zip") and FSM.file_exists(ps4_games + "/unrelated/keep.bin"), "PS4 cleanup preserves other games, anonymous artifacts, archive, and unrelated files")
+	_write(ps4_games + "/CUSA01130/partial.bin", "partial")
+	ps4_cleanup = GameExtraction.cleanup_ps4_extracted_game(ps4_games, "../CUSA01130", FSM)
+	_expect(not bool(ps4_cleanup.get("success", true)) and FSM.file_exists(ps4_games + "/CUSA01130/partial.bin"), "PS4 invalid cleanup identity leaves owned root untouched")
 
 	var xbox_staged := _temp_root + "/xbox_staged"
 	var xbox_live := _temp_root + "/xbox_live"
@@ -396,6 +510,263 @@ func _run_filesystem_tests() -> void:
 		_expect(FSM.file_exists(external + "/bios.bin"), "symlink target not moved")
 		_expect(FSM.extraction_tree_has_symlinks(linked), "unsafe staging can be quarantined instead of recursively cleaned")
 
+		var linked_live_external := _temp_root + "/linked_live_external"
+		var linked_live := _temp_root + "/linked_live"
+		var linked_source := _temp_root + "/linked_source"
+		_write(linked_live_external + "/old.bin", "old")
+		for index in range(70):
+			_write(linked_source + "/files/new_%02d.bin" % index, "new")
+		_expect(_make_symlink(linked_live_external, linked_live), "create linked destination root")
+		commit = FSM.merge_extraction_payload(linked_source, linked_live)
+		_expect_status("linked destination root rejected", commit, "io_error")
+		_expect(FSM.file_exists(linked_live_external + "/old.bin"), "linked destination root cannot delete external old content")
+		_expect(not FSM.file_exists(linked_live_external + "/files/new_00.bin"), "linked destination root cannot install into external target")
+
+		var ps4_link_external := _temp_root + "/ps4_link_external"
+		var ps4_link_root := _temp_root + "/ps4_link_root"
+		_write(ps4_link_external + "/sentinel.bin", "keep")
+		FSM.make_dir_recursive(ps4_link_root)
+		_expect(_make_symlink(ps4_link_external, ps4_link_root + "/CUSA01130"), "create PS4 linked owned root")
+		var ps4_link_cleanup: Dictionary = GameExtraction.cleanup_ps4_extracted_game(ps4_link_root, "CUSA01130", FSM)
+		_expect(not bool(ps4_link_cleanup.get("success", true)), "PS4 linked owned root cleanup rejected")
+		_expect(FSM.file_exists(ps4_link_external + "/sentinel.bin"), "PS4 linked cleanup cannot delete external target")
+
+		var listing_source := _temp_root + "/listing_source"
+		var listing_live := _temp_root + "/listing_live"
+		for index in range(70):
+			_write(listing_source + "/files/new_%02d.bin" % index, "new")
+		_write(listing_source + "/protected/new.bin", "new")
+		_write(listing_live + "/protected/old.bin", "old")
+		var protected_dir := ProjectSettings.globalize_path(listing_live + "/protected")
+		_expect(OS.execute("chmod", ["000", protected_dir], [], true) == 0, "make old payload directory unreadable")
+		var listing_result: Dictionary = FSM._try_swap_extraction_merge(listing_source, listing_live)
+		_expect(OS.execute("chmod", ["700", protected_dir], [], true) == 0, "restore old payload directory permissions")
+		_expect(not bool(listing_result.get("success", true)), "listing failure aborts swap instead of treating old directory as empty")
+		_expect(FSM.file_exists(listing_live + "/protected/old.bin"), "listing failure rollback restores unreadable old content")
+		_expect(not FSM.file_exists(listing_live + "/protected/new.bin"), "listing failure does not leave new content in live")
+		_expect(FSM.file_exists(listing_source + "/protected/new.bin"), "listing failure preserves staged new content")
+
+		var recovery_source := _temp_root + "/recovery_source"
+		var recovery_dest := _temp_root + "/recovery_dest"
+		var recovery_backup := _temp_root + "/recovery_backup"
+		_write(recovery_dest + "/new.bin", "new")
+		_write(recovery_dest + "/profiles/old.ini", "old")
+		_write(recovery_backup + "/Dolphin.exe", "old executable")
+		FSM.make_dir_recursive(recovery_backup + "/profiles")
+		var recovery_moves: Array[String] = ["profiles/old.ini", "profiles/missing.bin"]
+		var partial_rollback: Dictionary = FSM._rollback_swap_extraction_merge(recovery_source, recovery_dest, recovery_backup, recovery_moves)
+		_expect(not bool(partial_rollback.get("success", true)), "partial rollback failure is reported")
+		_expect(FSM.file_exists(recovery_dest + "/profiles/old.ini") and FSM.file_exists(recovery_dest + "/Dolphin.exe"), "rollback continues restoring other old entries after a failure")
+		_expect(FSM.file_exists(recovery_source + "/new.bin") and not FSM.file_exists(recovery_source + "/profiles/old.ini"), "partial rollback preserves remaining mixed source tree")
+		var recovery_path: String = FSM._preserve_extraction_recovery_source(recovery_source)
+		_expect(recovery_path != "" and FSM.file_exists(recovery_path + "/new.bin") and not FSM.dir_exists(recovery_source), "mixed recovery tree moves outside normal staging cleanup")
+
+func _run_3ds_tests() -> void:
+	var root := _temp_root + "/3ds"
+	var data := root + "/title/data"
+	var extdata := root + "/identity/extdata/00000000/00000001"
+	_write(data + "/old.bin", "old data")
+	_write(extdata + "/old.bin", "old extdata")
+	FSM.make_dir_recursive(data + "/old_empty")
+	FSM.make_dir_recursive(extdata + "/old_empty")
+	var both_zip := root + "/both.zip"
+	_make_test_zip(both_zip, ["data/new.bin", "data/replay_/", "extdata/new.bin", "extdata/empty_/"])
+	_expect(SaveLayout.unpack_3ds_archive(both_zip, data, extdata, FSM), "3DS two-component restore succeeds")
+	_expect(FSM.file_exists(data + "/new.bin") and FSM.file_exists(extdata + "/new.bin"), "3DS two-component restore installs both payloads")
+	_expect(not FSM.file_exists(data + "/old.bin") and not FSM.file_exists(extdata + "/old.bin"), "3DS replacement removes stale component content")
+	_expect(FSM.dir_exists(data + "/replay_"), "3DS restore preserves data empty directory")
+	_expect(FSM.dir_exists(extdata + "/empty_"), "3DS restore preserves extdata empty directory")
+	_expect(not FSM.dir_exists(data + "/old_empty") and not FSM.dir_exists(extdata + "/old_empty"), "3DS replacement removes old empty directories in replaced components")
+
+	_write(extdata + "/keep.bin", "keep")
+	FSM.make_dir_recursive(extdata + "/keep_empty")
+	var data_only_zip := root + "/data_only.zip"
+	_make_test_zip(data_only_zip, ["data/data_only.bin"])
+	_expect(SaveLayout.unpack_3ds_archive(data_only_zip, data, extdata, FSM), "3DS data-only restore succeeds")
+	_expect(FSM.file_exists(data + "/data_only.bin") and FSM.file_exists(extdata + "/keep.bin") and FSM.dir_exists(extdata + "/keep_empty"), "3DS data-only restore preserves extdata and empty directories")
+
+	_write(data + "/keep.bin", "keep")
+	FSM.make_dir_recursive(data + "/keep_empty")
+	var ext_only_zip := root + "/ext_only.zip"
+	_make_test_zip(ext_only_zip, ["extdata/ext_only.bin"])
+	_expect(SaveLayout.unpack_3ds_archive(ext_only_zip, data, extdata, FSM), "3DS extdata-only restore succeeds")
+	_expect(FSM.file_exists(extdata + "/ext_only.bin") and FSM.file_exists(data + "/keep.bin") and FSM.dir_exists(data + "/keep_empty"), "3DS extdata-only restore preserves data and empty directories")
+
+	var empty_zip := root + "/empty.zip"
+	_make_test_zip(empty_zip, [])
+	_expect(not SaveLayout.unpack_3ds_archive(empty_zip, data, extdata, FSM), "3DS empty archive rejected")
+	_expect(FSM.file_exists(data + "/keep.bin") and FSM.file_exists(extdata + "/ext_only.bin"), "3DS empty archive leaves live components intact")
+	var unknown_zip := root + "/unknown.zip"
+	_make_test_zip(unknown_zip, ["other/file.bin"])
+	_expect(not SaveLayout.unpack_3ds_archive(unknown_zip, data, extdata, FSM), "3DS unknown root rejected")
+	var traversal_zip := root + "/traversal.zip"
+	_make_test_zip(traversal_zip, ["data/../../escape.bin"])
+	_expect(not SaveLayout.unpack_3ds_archive(traversal_zip, data, extdata, FSM), "3DS traversal entry rejected")
+	_expect(not FSM.file_exists(root + "/escape.bin"), "3DS traversal cannot escape operation root")
+	var duplicate_zip := root + "/duplicate.zip"
+	_make_test_zip(duplicate_zip, ["data/same.bin", "data/same.bin"])
+	_expect(not SaveLayout.unpack_3ds_archive(duplicate_zip, data, extdata, FSM), "3DS duplicate destination rejected")
+	_expect(FSM.file_exists(data + "/keep.bin") and FSM.file_exists(extdata + "/ext_only.bin"), "3DS invalid archives leave live components intact")
+
+	# A read-only title parent prevents the staging root from being created. No
+	# live replacement or backup phase may begin.
+	var title_parent := ProjectSettings.globalize_path(root + "/title")
+	_expect(OS.execute("chmod", ["500", title_parent], [], true) == 0, "make 3DS staging parent read-only")
+	_expect(not SaveLayout.unpack_3ds_archive(data_only_zip, data, extdata, FSM), "3DS staging failure aborts before live mutation")
+	_expect(OS.execute("chmod", ["700", title_parent], [], true) == 0, "restore 3DS staging parent permissions")
+	_expect(FSM.file_exists(data + "/keep.bin") and FSM.file_exists(extdata + "/ext_only.bin"), "3DS staging failure preserves live components")
+
+	# Fail the second component's backup rename. The first component must be
+	# restored by the outer transaction and the second must remain untouched.
+	var tx_data := root + "/tx_data/data"
+	var tx_ext := root + "/tx_ext/extdata"
+	var tx_data_stage := root + "/tx_data/data_stage"
+	var tx_ext_stage := root + "/tx_ext/ext_stage"
+	_write(tx_data + "/old.bin", "old data")
+	_write(tx_ext + "/old.bin", "old extdata")
+	FSM.make_dir_recursive(tx_data + "/old_empty")
+	FSM.make_dir_recursive(tx_ext + "/old_empty")
+	_write(tx_data_stage + "/new.bin", "new data")
+	_write(tx_ext_stage + "/new.bin", "new extdata")
+	var tx_parent := ProjectSettings.globalize_path(root + "/tx_ext")
+	_expect(OS.execute("chmod", ["500", tx_parent], [], true) == 0, "make second 3DS destination parent read-only")
+	var transaction: Dictionary = SaveLayout.replace_components_transaction([
+		{"source": tx_data_stage, "destination": tx_data},
+		{"source": tx_ext_stage, "destination": tx_ext},
+	], FSM)
+	_expect(OS.execute("chmod", ["700", tx_parent], [], true) == 0, "restore second 3DS destination parent permissions")
+	_expect(not bool(transaction.get("success", true)), "3DS second component failure reported")
+	_expect(_read(tx_data + "/old.bin") == "old data" and _read(tx_ext + "/old.bin") == "old extdata", "3DS transaction rolls back both old components")
+	_expect(FSM.dir_exists(tx_data + "/old_empty") and FSM.dir_exists(tx_ext + "/old_empty"), "3DS rollback preserves old empty directories")
+	_expect(not FSM.file_exists(tx_data + "/new.bin") and not FSM.file_exists(tx_ext + "/new.bin"), "3DS rollback removes newly written component content")
+
+func _run_content_hash_tests() -> void:
+	var root := _temp_root + "/hashes"
+	_write(root + "/plain.bin", "abc")
+	_expect(ContentHash.compute_content_hash(root + "/plain.bin") == "900150983cd24fb0d6963f7d28e17f72", "RomM plain-file content hash matches raw MD5")
+	_write(root + "/plain.bin", "abd")
+	_expect(ContentHash.compute_content_hash(root + "/plain.bin") != "900150983cd24fb0d6963f7d28e17f72", "RomM content hash detects changed bytes")
+
+	var zip_path := root + "/entries.zip"
+	var writer := ZIPPacker.new()
+	_expect(writer.open(zip_path, ZIPPacker.APPEND_CREATE) == OK, "create hash verification ZIP")
+	writer.start_file("data/a.bin")
+	writer.write_file("new".to_utf8_buffer())
+	writer.start_file("data/empty.bin")
+	writer.write_file(PackedByteArray())
+	writer.close()
+	var expected_lines: Array[String] = [
+		"data/a.bin:" + ContentHash._md5_bytes("new".to_utf8_buffer()),
+		"data/empty.bin:" + ContentHash._md5_bytes(PackedByteArray()),
+	]
+	expected_lines.sort()
+	var expected_zip: String = ContentHash._md5_bytes("\n".join(expected_lines).to_utf8_buffer())
+	_expect(ContentHash.compute_content_hash(zip_path) == expected_zip, "RomM ZIP hash includes zero-length entries")
+	_expect(ContentHash.compute_content_hash(zip_path) == ContentHash.compute_zip_hash(zip_path), "content_hash auto-detects ZIP by magic")
+
+	_write(root + "/folder/a.bin", "new")
+	_write(root + "/folder/empty.bin", "")
+	var folder_hash: String = ContentHash.compute_folder_zip_hash(root + "/folder")
+	var folder_zip := root + "/folder.zip"
+	_expect(FSM.zip_directory(root + "/folder", folder_zip), "pack folder for hash parity check")
+	_expect(folder_hash == ContentHash.compute_zip_hash(folder_zip), "folder simulation and real ZIP hash agree with empty files")
+
+func _run_lifecycle_tests() -> void:
+	if FSM.dir_exists("user://temp/operations"):
+		FSM.delete_dir_recursive("user://temp/operations")
+	var destination := _temp_root + "/locked_destination"
+	var first := OperationLifecycle.acquire(destination, "extracting")
+	_expect(not first.is_empty(), "destination lock acquired")
+	_expect(OperationLifecycle.is_locked(destination), "destination reports locked while owned")
+	var competing := OperationLifecycle.acquire(destination, "commit_started")
+	_expect(competing.is_empty(), "independent same-process operation cannot claim owned destination")
+	var nested := OperationLifecycle.acquire(destination, "commit_started", 0, [], first)
+	_expect(not nested.is_empty() and bool(nested.get("nested", false)), "explicit parent token permits nested destination commit")
+	OperationLifecycle.release(nested)
+	var lock_dir := str(first.get("lock_dir", ""))
+	_expect(DirAccess.dir_exists_absolute(lock_dir), "atomic lock directory exists")
+	_expect(DirAccess.make_dir_absolute(lock_dir) != OK, "atomic lock directory cannot be claimed twice")
+	OperationLifecycle.update_phase(first, "commit_started")
+	var owner := OperationLifecycle.read_owner(lock_dir)
+	_expect(int(owner.get("pid", 0)) == OS.get_process_id() and str(owner.get("phase", "")) == "commit_started", "lock owner records process and phase")
+	OperationLifecycle.release(first)
+	_expect(not DirAccess.dir_exists_absolute(lock_dir), "lock release removes owner directory")
+	_expect(not OperationLifecycle.is_locked(destination), "destination reports unlocked after release")
+
+	var live_artifact := "user://temp/saves/live_operation"
+	_write(live_artifact + "/payload.bin", "live")
+	var live_lock := OperationLifecycle.acquire(destination, "extracting", 0, [live_artifact])
+	OperationLifecycle.cleanup_stale_operations(0)
+	_expect(FSM.file_exists(live_artifact + "/payload.bin"), "cleanup preserves artifact with live owner")
+	OperationLifecycle.release(live_lock)
+	FSM.delete_dir_recursive(live_artifact)
+
+	var stale_artifact := "user://temp/saves/stale_operation"
+	_write(stale_artifact + "/payload.bin", "stale")
+	var stale_lock := OperationLifecycle.acquire(destination, "extracting", 0, [stale_artifact])
+	var stale_owner := OperationLifecycle.read_owner(str(stale_lock.get("lock_dir", "")))
+	stale_owner["pid"] = 99999999
+	stale_owner["heartbeat"] = 0
+	OperationLifecycle._write_owner(str(stale_lock.get("lock_dir", "")), stale_owner)
+	OperationLifecycle.cleanup_stale_operations(0)
+	_expect(not FSM.file_exists(stale_artifact + "/payload.bin"), "dead pre-commit owner artifact reclaimed")
+	OperationLifecycle.release(stale_lock)
+
+	var acquire_stale_artifact := "user://temp/saves/acquire_stale_operation"
+	_write(acquire_stale_artifact + "/payload.bin", "stale")
+	var acquire_stale_lock := OperationLifecycle.acquire(destination, "extracting", 0, [acquire_stale_artifact])
+	var acquire_stale_owner := OperationLifecycle.read_owner(str(acquire_stale_lock.get("lock_dir", "")))
+	acquire_stale_owner["pid"] = 99999999
+	acquire_stale_owner["heartbeat"] = 0
+	OperationLifecycle._write_owner(str(acquire_stale_lock.get("lock_dir", "")), acquire_stale_owner)
+	OperationLifecycle._held.clear() # Simulate restart with only the stale on-disk lock.
+	var replacement_lock := OperationLifecycle.acquire(destination, "extracting")
+	_expect(not replacement_lock.is_empty() and not FSM.file_exists(acquire_stale_artifact + "/payload.bin"), "acquire reclaims dead pre-commit owner and artifact")
+	OperationLifecycle.release(replacement_lock)
+	OperationLifecycle.release(acquire_stale_lock)
+
+	var recovery_artifact := "user://temp/saves/recovery_operation"
+	_write(recovery_artifact + "/old.bin", "old")
+	var recovery_lock := OperationLifecycle.acquire(destination, "commit_started", 0, [recovery_artifact])
+	var recovery_owner := OperationLifecycle.read_owner(str(recovery_lock.get("lock_dir", "")))
+	recovery_owner["pid"] = 99999999
+	recovery_owner["heartbeat"] = 0
+	OperationLifecycle._write_owner(str(recovery_lock.get("lock_dir", "")), recovery_owner)
+	OperationLifecycle.cleanup_stale_operations(0)
+	_expect(FSM.file_exists(recovery_artifact + "/old.bin"), "dead commit-started recovery artifact preserved")
+	OperationLifecycle.release(recovery_lock)
+	FSM.delete_dir_recursive(recovery_artifact)
+
+	var preserved_artifact := "user://temp/saves/preserved_recovery"
+	_write(preserved_artifact + "/old.bin", "old")
+	var preserve_lock := OperationLifecycle.acquire(destination, "commit_started", 0, [preserved_artifact])
+	OperationLifecycle.preserve_recovery(preserve_lock, preserved_artifact)
+	OperationLifecycle.release(preserve_lock)
+	var quarantined := OperationLifecycle._child_dirs(OperationLifecycle.QUARANTINE_ROOT)
+	var rollback_manifest := false
+	for quarantine in quarantined:
+		rollback_manifest = rollback_manifest or str(OperationLifecycle.read_owner(quarantine).get("phase", "")) == "rollback_failed"
+	_expect(rollback_manifest, "release quarantines rollback recovery manifest")
+	_expect(FSM.file_exists(preserved_artifact + "/old.bin"), "release preserves rollback recovery artifact")
+	FSM.delete_dir_recursive(preserved_artifact)
+
+	var empty_lock := OperationLifecycle.LOCK_ROOT + "/empty.lock"
+	DirAccess.make_dir_recursive_absolute(empty_lock)
+	_expect(OS.execute("touch", ["-d", "2000-01-01", ProjectSettings.globalize_path(empty_lock)], [], true) == 0, "age empty lock directory")
+	OperationLifecycle.cleanup_stale_operations(0)
+	_expect(not DirAccess.dir_exists_absolute(empty_lock), "aged ownerless lock directory reclaimed")
+
+	var untracked := "user://temp/saves/.kyodai-extract-old"
+	_write(untracked + "/old.bin", "old")
+	_expect(OS.execute("touch", ["-d", "2000-01-01", ProjectSettings.globalize_path(untracked)], [], true) == 0, "age untracked operation directory")
+	_write("user://temp/saves/download_old.zip", "old")
+	_expect(OS.execute("touch", ["-d", "2000-01-01", ProjectSettings.globalize_path("user://temp/saves/download_old.zip")], [], true) == 0, "age abandoned download file")
+	OperationLifecycle.cleanup_stale_untracked(["user://temp/saves"], 0)
+	_expect(not FSM.dir_exists(untracked), "aged untracked operation directory reclaimed")
+	_expect(not FSM.file_exists("user://temp/saves/download_old.zip"), "aged abandoned download file reclaimed")
+	if FSM.dir_exists("user://temp/operations"):
+		FSM.delete_dir_recursive("user://temp/operations")
+
 func _expect_plan(name: String, entries: Array, options: Dictionary, expected_status: String, expected_root = null) -> void:
 	var result := Layout.plan(entries, options)
 	_expect(str(result.get("status", "")) == expected_status, "%s: expected %s, got %s (%s)" % [name, expected_status, result.get("status", ""), result.get("error", "")])
@@ -410,6 +781,16 @@ func _expect(condition: bool, name: String) -> void:
 	if not condition:
 		_failures += 1
 		printerr("[extraction-layout] FAIL: " + name)
+
+func _make_test_zip(path: String, entries: Array) -> void:
+	FSM.make_dir_recursive(path.get_base_dir())
+	var writer := ZIPPacker.new()
+	_expect(writer.open(path, ZIPPacker.APPEND_CREATE) == OK, "create 3DS test archive: " + path)
+	for entry in entries:
+		_expect(writer.start_file(entry) == OK, "start 3DS test ZIP entry: " + entry)
+		if not str(entry).ends_with("/"):
+			writer.write_file("new".to_utf8_buffer())
+	writer.close()
 
 func _write(path: String, content: String) -> void:
 	FSM.make_dir_recursive(path.get_base_dir())

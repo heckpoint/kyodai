@@ -13,6 +13,7 @@ const RSM = preload("res://managers/system_manager/resolution_sub_manager.gd")
 const _ContentHash = preload("res://utils/sync/content_hash.gd")
 const SaveLayout = preload("res://utils/filesystem/save_layout.gd")
 const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
+const OperationLifecycle = preload("res://utils/filesystem/operation_lifecycle.gd")
 # Gavel is a global class (utils/sync/gavel.gd); no preload const needed.
 const SLOT_DEFAULT := ""
 const MAX_FILE_SIZE := 100 * 1024 * 1024
@@ -106,19 +107,12 @@ func _schedule_temp_dir_cleanup() -> void:
 		return
 	_run_io_task("user://temp/saves", _cleanup_all_temp_dirs, Callable())
 
-## Cleans up all temp directories under user://temp/saves/
+## Reclaims only definitely stale operation artifacts. Live owners and every
+## post-commit backup/recovery tree are preserved, unlike the old recursive wipe.
 func _cleanup_all_temp_dirs() -> void:
-	var temp_base = "user://temp/saves"
-	if not FSM.dir_exists(temp_base):
-		return
-	var items = FSM.list_dir(temp_base + "/")
-	for item in items:
-		if item == "." or item == "..":
-			continue
-		var full_path = temp_base + "/" + item
-		if FSM.dir_exists(full_path):
-			print("[GameSaveSubManager] Cleaning up temp directory: " + full_path)
-			FSM.delete_dir_recursive(full_path)
+	var manifest_cleanup := OperationLifecycle.cleanup_stale_operations()
+	var untracked_cleanup := OperationLifecycle.cleanup_stale_untracked(["user://temp/saves"])
+	print("[GameSaveSubManager] Operation cleanup: locks=" + str(manifest_cleanup.get("reclaimed", 0)) + ", manifest deleted=" + str(manifest_cleanup.get("deleted", []).size()) + ", untracked deleted=" + str(untracked_cleanup.get("deleted", []).size()))
 
 ## Initializes the emulator strategy lookup table
 func _init_strategies() -> void:
@@ -292,8 +286,8 @@ func _init_strategies() -> void:
 				return record_path,
 			"zip": func(src: String, dst: String, game: GameResource) -> bool:
 				return _zip_3ds_save(src, dst, game),
-			"unpack": func(zip_path: String, record_path: String, _game: GameResource):
-				return _unpack_3ds_save(zip_path, record_path),
+			"unpack": func(zip_path: String, record_path: String, _game: GameResource, operation_token: Dictionary = {}):
+				return _unpack_3ds_save(zip_path, record_path, operation_token),
 		},
 		"retroarch": {
 			"validate": func(tid: String) -> String:
@@ -312,9 +306,9 @@ func _init_strategies() -> void:
 				return _zip_retroarch_save(src, dst, game),
 			# Only 3DS units need routed unpacking; other platforms return null
 			# so the caller falls through to generic archive extraction.
-			"unpack": func(zip_path: String, record_path: String, game: GameResource):
+			"unpack": func(zip_path: String, record_path: String, game: GameResource, operation_token: Dictionary = {}):
 				if game.platform_slug == "3ds" and _is_3ds_tree_path(record_path):
-					return _unpack_3ds_save(zip_path, record_path)
+					return _unpack_3ds_save(zip_path, record_path, operation_token)
 				return null,
 		},
 	}
@@ -2406,72 +2400,9 @@ func _zip_3ds_save(src: String, dst: String, _game: GameResource = null) -> bool
 ## the unit is never touched. Unknown roots fail loudly (no silent merges).
 ## Directory entries are recreated too: games probe for empty dirs (e.g.
 ## MK7's replay_), and dropping them makes the save read as corrupt.
-func _unpack_3ds_save(zip_path: String, record_path: String) -> bool:
+func _unpack_3ds_save(zip_path: String, record_path: String, operation_token: Dictionary = {}) -> bool:
 	var title_dir := record_path.rstrip("/")
-	var data_dest := title_dir + "/data"
-	var extdata_dest := _3ds_extdata_dir(title_dir)
-	var zr := ZIPReader.new()
-	if zr.open(zip_path) != OK:
-		push_error("[GameSaveSubManager] Failed to open downloaded save zip: " + zip_path)
-		return false
-	var ops: Array = []
-	var has_data := false
-	var has_extdata := false
-	var valid := true
-	for entry in zr.get_files():
-		var is_dir := entry.ends_with("/")
-		var rel := entry.rstrip("/")
-		var root := rel.get_slice("/", 0)
-		var base := ""
-		match root:
-			"data":
-				base = data_dest
-				has_data = true
-			"extdata":
-				base = extdata_dest
-				has_extdata = true
-			_:
-				push_error("[GameSaveSubManager] 3DS save zip has unknown root '" + root + "': " + zip_path)
-				valid = false
-				break
-		var sub := rel.substr(root.length() + 1)
-		var dest := base if sub == "" else base + "/" + sub
-		# Entries like "data/../../../../etc/x" (or backslash variants that
-		# become traversal on Windows) must never write outside their routed
-		# base directory.
-		if not FSM.is_path_contained(dest, base):
-			push_error("[GameSaveSubManager] 3DS save zip entry escapes target directory: '" + entry + "' in " + zip_path)
-			valid = false
-			break
-		ops.append({"entry": entry, "dest": dest, "is_dir": is_dir})
-	if not valid:
-		zr.close()
-		return false
-	if has_data and FSM.dir_exists(data_dest):
-		FSM.delete_dir_recursive(data_dest)
-	if has_extdata and FSM.dir_exists(extdata_dest):
-		FSM.delete_dir_recursive(extdata_dest)
-	var ok := true
-	for op in ops:
-		if op["is_dir"]:
-			if not FSM.make_dir_recursive(op["dest"]):
-				push_error("[GameSaveSubManager] Failed to create save directory: " + op["dest"])
-				ok = false
-				break
-		elif not _write_zip_entry(zr, op["entry"], op["dest"]):
-			ok = false
-			break
-	zr.close()
-	return ok
-
-func _write_zip_entry(zr: ZIPReader, entry: String, dest_path: String) -> bool:
-	if not FSM.make_dir_recursive(dest_path.get_base_dir()):
-		push_error("[GameSaveSubManager] Failed to create directory for: " + dest_path)
-		return false
-	if not FSM.write_file_bytes(dest_path, zr.read_file(entry)):
-		push_error("[GameSaveSubManager] Failed to write save file: " + dest_path)
-		return false
-	return true
+	return SaveLayout.unpack_3ds_archive(zip_path, title_dir + "/data", _3ds_extdata_dir(title_dir), FSM, operation_token)
 
 func _ensure_device_registered(callback: Callable) -> void:
 	var device_id = DataManager.get_romm_device_id()
@@ -3026,6 +2957,9 @@ func _restore_downloaded_save(zip_path: String, layout: Dictionary, on_complete:
 	if not FSM.make_dir_recursive(staging_dir):
 		on_complete.call(false)
 		return
+	var operation_token: Dictionary = layout.get("_operation_token", {})
+	if not operation_token.is_empty():
+		OperationLifecycle.track_artifact(operation_token, staging_dir)
 	FSM.extract_archive_async(zip_path, staging_dir, "Save data", false,
 		func(_info: Dictionary): pass,
 		func(extract_success: bool, error_msg: String):
@@ -3037,12 +2971,18 @@ func _restore_downloaded_save(zip_path: String, layout: Dictionary, on_complete:
 			var restored := _restore_staged_save(staging_dir, layout)
 			if not restored.get("success", false):
 				push_error("[GameSaveSubManager] Save restore failed: " + str(restored.get("error", "unknown error")))
-				_cleanup_save_staging(staging_dir)
+				if bool(restored.get("preserve_source", false)):
+					var recovery_path := str(restored.get("recovery_path", ""))
+					if recovery_path == "":
+						recovery_path = staging_dir
+					OperationLifecycle.preserve_recovery(layout.get("_operation_token", {}), recovery_path, [staging_dir, str(restored.get("backup_path", ""))])
+					push_warning("[GameSaveSubManager] Save recovery data preserved at " + recovery_path)
+				else:
+					_cleanup_save_staging(staging_dir)
 				on_complete.call(false)
 				return
-			if FSM.file_exists(zip_path):
-				FSM.delete_file(zip_path)
-			_cleanup_temp_dir(zip_path)
+			# Keep the source archive until post-commit validation and the
+			# confirmation boundary finish; the download operation owns cleanup.
 			_cleanup_save_staging(staging_dir)
 			on_complete.call(true)
 	)
@@ -3057,6 +2997,15 @@ func _cleanup_save_staging(staging_dir: String) -> void:
 		push_warning("[GameSaveSubManager] Leaving unsafe save staging in place: " + staging_dir)
 		return
 	FSM.delete_dir_recursive(staging_dir)
+
+func _save_mutation_root(record_path: String, layout: Dictionary, folder_save: bool) -> String:
+	if record_path.contains("/title/00040000/"):
+		# Lock the shared 3DS identity root so data and extdata cannot be
+		# restored concurrently by aliases or different emulator frontends.
+		return record_path.get_base_dir().get_base_dir().get_base_dir()
+	if folder_save and str(layout.get("commit_root", "")) != "":
+		return str(layout["commit_root"])
+	return record_path
 
 ## Executes one download operation: fetch, confirm, extract (folder saves and
 ## zip-packaged file saves), and record the gavel bookkeeping boundary.
@@ -3104,14 +3053,22 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 		local_path = record_path
 		if emulator_id == "retroarch":
 			FSM.make_dir_recursive(record_path.get_base_dir())
-		# Godot's HTTPRequest writes download_file with direct File I/O, which
-		# cannot touch SAF-grant-only Android/data trees; stage in user://temp
-		# and place via the plugin after the download. Devices with direct
-		# access keep the single-write path.
-		if _must_stage_download(local_path):
+		if local_path.to_lower().ends_with(".zip"):
+			# A zip-packaged file save is restored into its owned root; never
+			# overwrite an existing live ZIP just to use it as the source archive.
+			local_path = "user://temp/saves/download_" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000) + ".zip"
+			download_dest = local_path
+			FSM.make_dir_recursive(local_path.get_base_dir())
+		elif _must_stage_download(local_path):
+			# HTTPRequest cannot write restricted trees directly. Keep the
+			# existing plugin placement path after content verification.
 			download_dest = "user://temp/saves/staged_" + str(Time.get_ticks_msec()) + "_" + file_name
 			FSM.make_dir_recursive(download_dest.get_base_dir())
 			print("[GameSaveSubManager] Destination is SAF-gated; staging download in " + download_dest)
+		else:
+			# Stage plain files beside their final path. Verification failure leaves
+			# the old file untouched, and a verified move commits on one filesystem.
+			download_dest = record_path.get_base_dir() + "/.kyodai-extract-download-" + str(Time.get_ticks_msec()) + "_" + str(randi() % 1000)
 
 	# Last-line defense for filename aliases. A remote-only record should only
 	# materialize a missing save; it must never overwrite a file/folder that
@@ -3144,38 +3101,75 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 
 	var restore_layout := _get_save_layout(emulator_id, save_dir, record_path, game, file_name)
 	boundary_path.path = str(restore_layout.get("boundary_path", record_path))
+	var mutation_root := _save_mutation_root(record_path, restore_layout, is_folder_save)
+	var operation_lock := OperationLifecycle.acquire(mutation_root, "downloading", 0, [download_dest])
+	if operation_lock.is_empty():
+		push_warning("[GameSaveSubManager] Another save operation already owns this destination: " + mutation_root)
+		on_done.call(false)
+		return
+	restore_layout["_operation_token"] = operation_lock
 	print("[GameSaveSubManager] Downloading remote save '" + file_name + "' (id " + str(save_id) + ") -> '" + local_path + "' (record path: '" + record_path + "')")
 
 	SystemManager.network.download_save(save_id, device_id, download_dest, func(_success: bool, _status_code: int, error_msg: String):
+		var finished := {"done": false}
+		var finish_operation = func(success: bool) -> void:
+			if bool(finished.get("done", false)):
+				return
+			finished["done"] = true
+			if FSM.file_exists(download_dest):
+				FSM.delete_file(download_dest)
+			_cleanup_temp_dir(download_dest)
+			OperationLifecycle.release(operation_lock)
+			on_done.call(success)
 		if not _success:
 			push_error("[GameSaveSubManager] Download failed for save " + str(save_id) + ": " + error_msg)
-			on_done.call(false)
+			finish_operation.call(false)
 			return
 
-		SystemManager.network.confirm_save_downloaded(save_id, device_id, func(_data, confirm_error):
-			if confirm_error != "":
-				push_warning("[GameSaveSubManager] Failed to confirm download: " + confirm_error)
-
-			# Place a staged download into the (possibly SAF-gated) destination
-			# tree via the plugin before any extraction reads it.
+		var proceed = func() -> void:
+			OperationLifecycle.update_phase(operation_lock, "commit_started")
+			# Place only verified staged content into the live destination tree.
 			if download_dest != local_path:
 				if not FSM.move(download_dest, local_path):
 					push_error("[GameSaveSubManager] Failed to place staged download at '" + local_path + "'")
-					FSM.delete_file(download_dest)
-					on_done.call(false)
+					finish_operation.call(false)
 					return
 
-			var post_extraction = func(extract_success: bool):
+			var post_extraction = func(extract_success: bool) -> void:
 				if not extract_success:
-					on_done.call(false)
+					finish_operation.call(false)
 					return
 				boundary_path.path = str(restore_layout.get("boundary_path", boundary_path.path))
-				if LaunchManager.registry.get_emulator_architecture(emulator_id) == "pcsx2":
-					ensure_pcsx2_superblock(save_dir)
-				_record_sync_boundary(game, emulator_id, file_name, boundary_path.path, current_timestamp, save_id, remote.get("content_hash", ""))
-				# Small delay to let the filesystem settle before emulator launch
-				await get_tree().create_timer(0.1).timeout
-				on_done.call(true)
+				if LaunchManager.registry.get_emulator_architecture(emulator_id) == "pcsx2" and not ensure_pcsx2_superblock(save_dir):
+					push_error("[GameSaveSubManager] PCSX2 superblock validation failed; download is not confirmed")
+					finish_operation.call(false)
+					return
+				OperationLifecycle.update_phase(operation_lock, "validating")
+				_run_io_task(boundary_path.path,
+					func(): return _compute_local_save_hash(emulator_id, game, {"file_path": boundary_path.path}),
+					func(hash_info):
+						if not hash_info is Dictionary or str(hash_info.get("hash", "")).is_empty():
+							push_error("[GameSaveSubManager] Could not hash restored save; download is not confirmed")
+							finish_operation.call(false)
+							return
+						OperationLifecycle.update_phase(operation_lock, "confirming")
+						SystemManager.network.confirm_save_downloaded(save_id, device_id, func(_data, confirm_error):
+							if confirm_error != "":
+								# Do not create a synced baseline until RomM confirms. The
+								# next sync must retry confirmation rather than skip locally.
+								push_warning("[GameSaveSubManager] Local restore validated but RomM confirmation failed: " + confirm_error)
+								finish_operation.call(false)
+								return
+							var recorded: bool = DataManager.update_save_sync_record(game.romm_id, emulator_id, file_name, boundary_path.path, current_timestamp, save_id, SLOT_DEFAULT, str(hash_info.get("hash", "")), str(remote.get("content_hash", "")), int(hash_info.get("size", 0)))
+							if not recorded:
+								push_error("[GameSaveSubManager] Could not persist restored-save boundary after confirmation")
+								finish_operation.call(false)
+								return
+							# Small delay to let the filesystem settle before emulator launch.
+							await get_tree().create_timer(0.1).timeout
+							finish_operation.call(true)
+						)
+				)
 
 			if is_folder_save:
 				# Routed-unpack hook: strategies that need per-entry routing
@@ -3184,13 +3178,10 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 				var unpack = _get_strategy(emulator_id, "unpack")
 				var unpacked = null
 				if unpack.is_valid():
-					unpacked = unpack.call(zip_path, record_path, game)
+					unpacked = unpack.call(zip_path, record_path, game, operation_lock)
 				if unpacked != null:
 					if not unpacked:
 						push_error("[GameSaveSubManager] Failed to unpack downloaded zip: " + zip_path)
-					elif FSM.file_exists(zip_path):
-						FSM.delete_file(zip_path)
-					_cleanup_temp_dir(zip_path)
 					post_extraction.call(unpacked)
 					return
 				_restore_downloaded_save(zip_path, restore_layout, post_extraction)
@@ -3199,6 +3190,23 @@ func _execute_save_download(game: GameResource, emulator_id: String, remote: Dic
 				_restore_downloaded_save(local_path, restore_layout, post_extraction)
 			else:
 				post_extraction.call(true)
+
+		var expected_hash := str(remote.get("content_hash", "") if remote.get("content_hash", "") != null else "").strip_edges().to_lower()
+		OperationLifecycle.update_phase(operation_lock, "verifying")
+		_run_io_task(download_dest,
+			func(): return _ContentHash.compute_content_hash(download_dest),
+			func(actual_hash):
+				if not actual_hash is String:
+					push_error("[GameSaveSubManager] Content-hash worker was unavailable; download is not confirmed")
+					finish_operation.call(false)
+					return
+				if expected_hash != "" and (actual_hash.is_empty() or actual_hash.to_lower() != expected_hash):
+					push_error("[GameSaveSubManager] Downloaded content hash mismatch for save " + str(save_id) + "; live save is unchanged")
+					finish_operation.call(false)
+					return
+				if expected_hash == "":
+					push_warning("[GameSaveSubManager] Remote save has no content_hash; using legacy unverified-download compatibility")
+				proceed.call()
 		)
 	)
 

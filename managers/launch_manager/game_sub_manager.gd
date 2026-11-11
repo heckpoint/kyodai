@@ -7,6 +7,7 @@ const DEBUG_LOG: bool = false
 const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
 const CSM = preload("res://managers/system_manager/config_sub_manager.gd")
 const GameExtraction = preload("res://utils/filesystem/game_extraction.gd")
+const OperationLifecycle = preload("res://utils/filesystem/operation_lifecycle.gd")
 const _SigilRunner = preload("res://utils/identity/sigil_runner.gd")
 
 var launch_manager: Node
@@ -595,6 +596,10 @@ func _prepare_xenia_archive_game(game: GameResource, intent: LaunchIntent, rom_p
 	if DEBUG_LOG: print("[GameManager] Xenia: XBLA extraction path: " + extract_path)
 
 	if not _xbox360_game_has_files(extract_path):
+		# This output already failed launch-file validation, so there is no
+		# valid install worth backing up. Preserve only newly staged content.
+		if FSM.dir_exists(extract_path):
+			FSM.delete_dir_recursive(extract_path)
 		# Preserve Xbox's internal layout (default.xex/STFS discovery already
 		# tolerates wrappers), but stage and replace the owned title root as one unit.
 		var staging_dir := GameExtraction.staging_path(extract_path)
@@ -847,6 +852,10 @@ func _prepare_vita3k_game(game: GameResource, intent: LaunchIntent, is_shuffler:
 		_ensure_vita3k_license(rom_path, emulator_dir, title_id)
 		return true
 	
+	# Existing output failed structural or TitleID validation and is not a
+	# usable install worth backing up.
+	if FSM.dir_exists(vita_app_path):
+		FSM.delete_dir_recursive(vita_app_path)
 	# Extract beside the owned title root, then normalize and replace it as one
 	# unit. Shared ux0/app is never scanned for the current archive's payload.
 	var staging_dir := GameExtraction.staging_path(vita_app_path)
@@ -1689,11 +1698,19 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	if DEBUG_LOG: print("[GameManager] shadPS4: Using TitleID: " + title_id)
 	
 	var rom_parent_dir = rom_path.get_base_dir()
-	var extract_path = FSM.join_paths(rom_parent_dir, title_id)
+	var extract_path = GameExtraction.ps4_owned_root(rom_parent_dir, title_id)
+	if extract_path == "":
+		push_error("[GameManager] shadPS4: Refusing invalid extraction TitleID: " + title_id)
+		return false
+	var operation_lock := OperationLifecycle.acquire(extract_path, "extracting")
+	if operation_lock.is_empty():
+		push_warning("[GameManager] shadPS4: Another operation already owns " + extract_path)
+		return false
 	if DEBUG_LOG: print("[GameManager] shadPS4: Extraction path: " + extract_path)
 	
 	if _shadps4_game_has_files(extract_path) and _app_game_matches_title(extract_path, title_id):
 		if DEBUG_LOG: print("[GameManager] shadPS4: Game already extracted at: " + extract_path)
+		OperationLifecycle.release(operation_lock)
 		return true
 	
 	if DEBUG_LOG: print("[GameManager] shadPS4: Game not extracted, will extract to: " + extract_path)
@@ -1702,6 +1719,7 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 		if DEBUG_LOG: print("[GameManager] shadPS4: Creating extraction directory: " + extract_path)
 		if not FSM.make_dir_recursive(extract_path):
 			push_error("[GameManager] shadPS4: Failed to create extraction directory: " + extract_path)
+			OperationLifecycle.release(operation_lock)
 			return false
 	
 	var shadps4_notify_id = SystemManager.notifications.show_notification(
@@ -1716,9 +1734,14 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	)
 	if DEBUG_LOG: print("[GameManager] shadPS4: Extracting ZIP to: " + extract_path)
 
+	# Existing output failed structural or TitleID validation and is not a
+	# usable install worth backing up.
+	if FSM.dir_exists(extract_path):
+		FSM.delete_dir_recursive(extract_path)
 	# Both backends consume <rom-parent>/<TitleID>; normalize the payload in a
 	# sibling staging root instead of relying on the archive's raw nesting.
-	var staging_dir := GameExtraction.staging_path(extract_path)
+	var staging_dir := GameExtraction.staging_path(extract_path, title_id)
+	OperationLifecycle.track_artifact(operation_lock, staging_dir)
 	var extract_success := await _extract_shadps4_zip(rom_path, staging_dir)
 	
 	# Dismiss the extraction notification
@@ -1728,6 +1751,7 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	
 	if not extract_success:
 		_cleanup_game_staging(staging_dir)
+		OperationLifecycle.release(operation_lock)
 		push_error("[GameManager] shadPS4: Failed to extract PS4 game ZIP: " + rom_path)
 		return false
 
@@ -1735,18 +1759,23 @@ func _prepare_shadps4_game(game: GameResource, intent: LaunchIntent) -> bool:
 	var status := str(normalization.get("status", ""))
 	if not ["normalized", "already_canonical"].has(status):
 		_cleanup_game_staging(staging_dir)
+		OperationLifecycle.release(operation_lock)
 		push_error("[GameManager] shadPS4: Unexpected archive layout: " + str(normalization.get("error", status)))
 		return false
 	if not _app_game_has_files(staging_dir) or not _app_game_matches_title(staging_dir, title_id):
 		_cleanup_game_staging(staging_dir)
+		OperationLifecycle.release(operation_lock)
 		push_error("[GameManager] shadPS4: Extracted payload is incomplete or has the wrong TitleID")
 		return false
-	var commit := FSM.replace_extraction_payload(staging_dir, extract_path)
+	OperationLifecycle.update_phase(operation_lock, "commit_started")
+	var commit := FSM.replace_extraction_payload(staging_dir, extract_path, false, operation_lock)
 	if str(commit.get("status", "")) != "replaced":
 		_cleanup_game_staging(staging_dir)
+		OperationLifecycle.release(operation_lock)
 		push_error("[GameManager] shadPS4: Failed to commit extracted game: " + str(commit.get("error", "unknown error")))
 		return false
 	
+	OperationLifecycle.release(operation_lock)
 	print("[GameManager] shadPS4: Extraction complete")
 
 	return true
@@ -1790,12 +1819,16 @@ func _extract_shadps4_zip(zip_path: String, extract_to: String) -> bool:
 	return await _await_extraction(item_id, "GameManager] shadPS4")
 
 ## Cleans up extracted game files when a game is deleted
-## Platforms that extract: PS3 (RPCS3), Vita (Vita3K)
-func cleanup_extracted_game_files(game: GameResource) -> void:
+## Platforms that extract: PS3 (RPCS3), Vita (Vita3K), Xbox 360, PS4
+func cleanup_extracted_game_files(game: GameResource, operation_token: Dictionary = {}) -> void:
 	if not game:
 		return
 	# Extraction paths are keyed on the active variant's title id.
 	var title_id := game.get_active_title_id()
+	if game.platform_slug == "ps4" and game.selected_sibling_id != 0 and title_id == "":
+		# Never fall back to deleting the main variant's root when the selected
+		# sibling has no identity of its own.
+		return
 	if title_id == "":
 		title_id = game.title_id
 	if title_id == "":
@@ -1837,6 +1870,22 @@ func cleanup_extracted_game_files(game: GameResource) -> void:
 					if FSM.dir_exists(vita_path):
 						print("[GameManager] Cleaning up extracted Vita game data: " + vita_path)
 						FSM.delete_dir_recursive(vita_path)
+		"ps4":
+			var root_folder = DataManager.get_setting("games_root_folder")
+			var root_path: String = root_folder.value if root_folder else "user://roms/"
+			var owned_root := GameExtraction.ps4_owned_root(root_path + "/ps4", title_id)
+			if owned_root == "":
+				return
+			var operation_lock := OperationLifecycle.acquire(owned_root, "cleanup", 0, [], operation_token)
+			if operation_lock.is_empty():
+				push_warning("[GameManager] Refusing PS4 cleanup while another operation owns " + owned_root)
+				return
+			var cleanup: Dictionary = GameExtraction.cleanup_ps4_extracted_game(root_path + "/ps4", title_id, FSM)
+			OperationLifecycle.release(operation_lock)
+			for deleted in cleanup.get("deleted", []):
+				print("[GameManager] Cleaned up extracted PS4 game data: " + str(deleted))
+			for error in cleanup.get("errors", []):
+				push_warning("[GameManager] " + str(error))
 		"xbox360":
 			# XBLA archives extract next to the source archive; file_path points at the folder
 			if game.file_path != "" and FSM.dir_exists(game.file_path):

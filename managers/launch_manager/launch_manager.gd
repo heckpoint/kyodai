@@ -344,8 +344,8 @@ func get_emulator_active_download(emulator_id: String):
 # Game preparation wrappers
 # ============================================================================
 
-func cleanup_extracted_game_files(game: GameResource) -> void:
-	$GameSubManager.cleanup_extracted_game_files(game)
+func cleanup_extracted_game_files(game: GameResource, operation_token: Dictionary = {}) -> void:
+	$GameSubManager.cleanup_extracted_game_files(game, operation_token)
 
 # ============================================================================
 # Firmware wrappers
