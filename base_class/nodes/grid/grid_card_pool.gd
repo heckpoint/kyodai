@@ -51,6 +51,7 @@ static func probe_capabilities(card_scene: PackedScene) -> Dictionary:
 		"update_card_state_from_settings": probe.has_method("_update_card_state_from_settings"),
 		"sync_visual_transform": probe.has_method("sync_visual_transform"),
 		"sync_visual_offset": probe.has_method("sync_visual_transform_with_offset"),
+		"visual_layer_opacity": probe.has_method("set_visual_layer_opacity"),
 		"mark_visuals_position_synced": probe.has_method("_mark_visuals_position_synced"),
 		"unmark_visuals_position_synced": probe.has_method("_unmark_visuals_position_synced"),
 		"show_loading_skeleton": probe.has_method("show_loading_skeleton"),

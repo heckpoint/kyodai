@@ -191,5 +191,5 @@ void fragment() {
 	if (col.a <= 0.0) {
 		discard;
 	}
-	COLOR = col;
+	COLOR = col * COLOR;
 }

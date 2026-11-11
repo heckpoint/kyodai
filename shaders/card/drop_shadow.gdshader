@@ -53,5 +53,5 @@ void fragment() {
 	// Shadow only appears outside the card
 	shadow_alpha *= (1.0 - card_alpha);
 	
-	COLOR = vec4(shadow_color.rgb, shadow_color.a * shadow_alpha * effect_alpha);
+	COLOR = vec4(shadow_color.rgb, shadow_color.a * shadow_alpha * effect_alpha) * COLOR;
 }

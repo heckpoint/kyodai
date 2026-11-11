@@ -172,5 +172,5 @@ void fragment() {
 	float content_alpha = max(image_aa, lights_intensity);
 	float final_alpha = edge_alpha * content_alpha * effect_alpha;
 	
-	COLOR = vec4(final_rgb, final_alpha);
+	COLOR = vec4(final_rgb, final_alpha) * COLOR;
 }

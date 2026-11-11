@@ -661,6 +661,46 @@ func _on_more_button_pressed() -> void:
 	align_submenu.add_check_item("Right / Bottom", content_alignment == 2, func(): _set_content_alignment(2))
 	menu.add_submenu_item("Content Alignment", align_submenu, "format-align-center")
 
+	# Text Settings submenu. Visibility and marquee options are independent;
+	# alignment choices share one persisted, mutually exclusive value.
+	var show_platform := true
+	var text_alignment := 0
+	var scroll_truncation := false
+	var text_focused_only := false
+	if DataManager:
+		var platform_setting = DataManager.get_setting("library_card_show_platform")
+		if platform_setting and platform_setting.value is bool:
+			show_platform = platform_setting.value
+		var text_align_setting = DataManager.get_setting("library_card_text_alignment")
+		if text_align_setting and text_align_setting.value is int:
+			text_alignment = text_align_setting.value
+		var scroll_setting = DataManager.get_setting("library_card_scroll_truncation")
+		if scroll_setting and scroll_setting.value is bool:
+			scroll_truncation = scroll_setting.value
+		var focused_setting = DataManager.get_setting("library_card_text_focused_only")
+		if focused_setting and focused_setting.value is bool:
+			text_focused_only = focused_setting.value
+
+	# Follow Content is the compatibility default. Reflect the effective
+	# alignment in the checkmarks until the user chooses an explicit override.
+	var effective_text_alignment := text_alignment
+	if effective_text_alignment == 0:
+		effective_text_alignment = content_alignment + 1
+
+	var text_settings = M3Menu.new()
+	text_settings.auto_free = false
+	text_settings.add_check_item("Show Platform", show_platform, _toggle_card_show_platform)
+	text_settings.add_section_label("Text Alignment")
+	# Alignment is mutually exclusive through the persisted value. Keeping these
+	# choices inline also avoids unreliable second-level submenu pointer input.
+	text_settings.add_check_item("Left", effective_text_alignment == 1, func(): _set_card_text_alignment(1))
+	text_settings.add_check_item("Center", effective_text_alignment == 2, func(): _set_card_text_alignment(2))
+	text_settings.add_check_item("Right", effective_text_alignment == 3, func(): _set_card_text_alignment(3))
+	text_settings.add_separator()
+	text_settings.add_check_item("Scroll Truncation", scroll_truncation, _toggle_card_scroll_truncation)
+	text_settings.add_check_item("Focused Only", text_focused_only, _toggle_card_text_focused_only)
+	menu.add_submenu_item("Text Settings", text_settings, "format-text")
+
 	if _more_button:
 		menu.popup(_more_button)
 
@@ -684,6 +724,32 @@ func _set_content_alignment(alignment: int) -> void:
 		if setting:
 			DataManager.set_setting(alignment, setting)
 			DataManager.save_settings()
+
+func _set_card_text_alignment(alignment: int) -> void:
+	if DataManager:
+		var setting = DataManager.get_setting("library_card_text_alignment")
+		if setting:
+			DataManager.set_setting(alignment, setting)
+			DataManager.save_settings()
+
+func _toggle_card_show_platform() -> void:
+	_toggle_card_text_bool("library_card_show_platform", true)
+
+func _toggle_card_scroll_truncation() -> void:
+	_toggle_card_text_bool("library_card_scroll_truncation", false)
+
+func _toggle_card_text_focused_only() -> void:
+	_toggle_card_text_bool("library_card_text_focused_only", false)
+
+func _toggle_card_text_bool(property_name: String, default_value: bool) -> void:
+	if not DataManager:
+		return
+	var setting = DataManager.get_setting(property_name)
+	if not setting:
+		return
+	var current_value: bool = setting.value if setting.value is bool else default_value
+	DataManager.set_setting(not current_value, setting)
+	DataManager.save_settings()
 
 func _set_focus_centering(mode: int) -> void:
 	if DataManager:

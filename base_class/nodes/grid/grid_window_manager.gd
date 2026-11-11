@@ -85,6 +85,7 @@ func on_scroll_value_changed(value: float, allow_recycle: bool = true, force_rec
 		_grid._prefetch_scroll_lead(stride, items_per_line)
 		_grid._effect_queue.flush_for_visible_zone()
 		flush_pending_visual_setup_for_visible_zone()
+		_grid._visual_sync.update_pagination_opacity()
 		# No stamp here: pass-end runs mid-cascade (margin/center sorts queued
 		# by this very pass may still be pending), and any stamp is superseded
 		# by _on_frame_pre_draw before render anyway. Mid-cascade stamps were a
@@ -121,6 +122,7 @@ func on_scroll_value_changed(value: float, allow_recycle: bool = true, force_rec
 	# visible zone; finish them immediately so the user doesn't see blanks.
 	_grid._effect_queue.flush_for_visible_zone()
 	flush_pending_visual_setup_for_visible_zone()
+	_grid._visual_sync.update_pagination_opacity()
 	# No pass-end stamp: pre-draw re-stamps post-cascade every changed frame.
 	# Cards added/recycled this pass stay hidden until the FlowContainer sort
 	# commits their positions; _on_flow_sorted reveals them exactly once,

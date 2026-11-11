@@ -51,7 +51,7 @@ void fragment() {
 	vec4 shine = line_color;
 	shine.a *= line_intensity * edge_alpha * effect_alpha;
 
-	COLOR = shine;
+	COLOR = shine * COLOR;
 	if (COLOR.a <= 0.0) {
 		discard;
 	}

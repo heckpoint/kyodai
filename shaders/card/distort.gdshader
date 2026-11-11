@@ -85,5 +85,5 @@ void fragment() {
 	// Apply opacity and effect alpha
 	tex_color.a *= opacity * edge_alpha * effect_alpha;
 	
-	COLOR = tex_color;
+	COLOR = tex_color * COLOR;
 }

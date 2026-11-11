@@ -108,5 +108,5 @@ void fragment() {
 	// OUTPUT
 	// =========================
 	
-	COLOR = vec4(adjusted_color, tex_color.a * edge_alpha * effect_alpha);
+	COLOR = vec4(adjusted_color, tex_color.a * edge_alpha * effect_alpha) * COLOR;
 }

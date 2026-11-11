@@ -27,7 +27,7 @@ const LETTERS: Array[String] = [
 const WIDTH_DP: float = 26.0
 const EDGE_MARGIN_DP: float = 4.0
 const SLOT_MIN_HEIGHT_DP: float = 15.0
-const BACKGROUND_ALPHA: float = 0.7
+const BACKGROUND_ALPHA: float = 0.25
 const DISABLED_ALPHA: float = 0.3
 const INACTIVE_ALPHA: float = 0.8
 
@@ -65,6 +65,7 @@ var _magnet_target: float = 0.0
 var _magnet_hold: float = 0.0
 
 var _vbox: VBoxContainer
+var _background: Panel
 var _labels: Dictionary = {}  # letter -> M3Label
 var _up_arrow: M3IconButton
 var _down_arrow: M3IconButton
@@ -97,14 +98,12 @@ func _setup_anchors() -> void:
 
 
 func _setup_ui() -> void:
-	var bg := ColorRect.new()
-	bg.name = "Background"
-	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var bg_color := M3Theme.get_surface_container()
-	bg_color.a = BACKGROUND_ALPHA
-	bg.color = bg_color
-	add_child(bg)
+	_background = Panel.new()
+	_background.name = "Background"
+	_background.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_background.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_background)
+	_update_background_style()
 
 	_vbox = VBoxContainer.new()
 	_vbox.name = "Slots"
@@ -134,6 +133,28 @@ func _setup_ui() -> void:
 	_vbox.add_child(_down_arrow)
 
 
+func _update_background_style() -> void:
+	if not _background:
+		return
+	var bg_color := M3Theme.get_surface_container()
+	bg_color.a = BACKGROUND_ALPHA
+	# A radius of half the shortest side makes a true capsule with
+	# semicircular ends rather than a merely rounded rectangle.
+	var fallback_size := M3Units.dp(WIDTH_DP)
+	var width := size.x if size.x > 0.0 else fallback_size
+	var height := size.y if size.y > 0.0 else fallback_size * 2.0
+	var radius := int(round(minf(width, height) * 0.5))
+	_background.add_theme_stylebox_override("panel", M3Theme.make_flat(bg_color, radius))
+
+
+func refresh_theme() -> void:
+	_update_background_style()
+
+
+func refresh_scale() -> void:
+	_update_background_style()
+
+
 func _make_arrow(icon_name: String) -> M3IconButton:
 	var arrow := M3IconButton.new()
 	arrow.icon_name = icon_name
@@ -149,6 +170,7 @@ func _make_arrow(icon_name: String) -> M3IconButton:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
+		_update_background_style()
 		_request_layout_recompute()
 
 

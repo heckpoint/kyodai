@@ -15,6 +15,7 @@ var vertical: bool = true
 var separation: int = 0
 var staggered: bool = false      # staggered brick rows (vertical GRID only)
 var paginated: bool = false      # page groups (GRID only)
+var page_preview: float = 0.0    # adjacent-page pixels visible at snapped positions
 var items_per_line: int = 1
 var stride: float = 0.0          # scroll-axis pitch (card scroll size + separation)
 var card_scroll: float = 0.0     # card size on the scroll axis
@@ -91,13 +92,16 @@ func first_index_for_line(line: int, ipl: int = -1) -> int:
 func page_content_size() -> float:
 	return lines_per_page() * stride - separation
 
-## Blank space between page groups in the scroll direction: the leftover slack
-## plus one full stride, so the next page always starts beyond the viewport's
-## far edge and neighbors are never visible at rest (no culling needed).
+## Blank space between page groups in the scroll direction. At a snapped page
+## position, size the gap so the next page starts page_preview pixels inside the
+## viewport (and the previous page leaves the same preview at the leading edge).
+## The minimum keeps the full-line flow spacer representable; unusually tight
+## pages gracefully reduce the preview instead of creating negative geometry.
 func page_gap() -> float:
 	if not paginated:
 		return 0.0
-	return (viewport - page_content_size()) + stride
+	var desired_gap := page_center_offset() - page_preview - separation
+	return maxf(separation + 1.0, desired_gap)
 
 ## Scroll-axis distance from one page start to the next (page + gap).
 func page_period() -> float:

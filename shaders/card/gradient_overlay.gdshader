@@ -36,7 +36,7 @@ void fragment() {
 	gradient_color.a *= edge_alpha * effect_alpha;
 	
 	// Output the gradient color
-	COLOR = gradient_color;
+	COLOR = gradient_color * COLOR;
 	
 	// Discard fully transparent pixels
 	if (COLOR.a <= 0.0) {

@@ -131,7 +131,7 @@ void fragment() {
 
 	out_color.a *= edge_alpha * effect_alpha;
 
-	COLOR = out_color;
+	COLOR = out_color * COLOR;
 
 	if (COLOR.a <= 0.0) {
 		discard;

@@ -24,6 +24,7 @@ func set_game_with_priority(value: GameResource, high_priority: bool):
 	if game == value:
 		return
 	game = value
+	_loading_texture = _tinted_placeholder_texture(game.id if game else "")
 	game_changed.emit(game)
 	_image_priority_high = high_priority
 	_update_texture_pin_state()
@@ -31,6 +32,7 @@ func set_game_with_priority(value: GameResource, high_priority: bool):
 
 @export var preview_mode: bool = false
 
+static var _placeholder_theme_key: String = ""
 static var _placeholder_texture: Texture2D = _create_placeholder_texture()
 
 ## Per-game placeholder color: derived from the game id hash (stable per
@@ -41,11 +43,29 @@ static var _placeholder_texture: Texture2D = _create_placeholder_texture()
 const PLACEHOLDER_HUE_STEPS: int = 24
 static var _placeholder_tint_cache: Dictionary = {}  # hue_step -> Texture2D
 
+static func _placeholder_base_color() -> Color:
+	return M3Theme.get_elevation_surface(5)
+
+static func _sync_placeholder_theme() -> void:
+	# ImageTextures are shared and cannot follow M3Theme automatically. Rebuild
+	# the neutral texture and invalidate every tint when the surface palette changes.
+	var key := _placeholder_base_color().to_html()
+	if key == _placeholder_theme_key:
+		return
+	_placeholder_theme_key = key
+	_placeholder_texture = _create_placeholder_texture()
+	_placeholder_tint_cache.clear()
+
 static func placeholder_color_for_id(id: String) -> Color:
+	var base := _placeholder_base_color()
+	var dark := base.get_luminance() < 0.5
 	var step := absi(hash(id)) % PLACEHOLDER_HUE_STEPS
-	return Color.from_hsv(float(step) / PLACEHOLDER_HUE_STEPS, 0.30, 0.16)
+	var value := maxf(base.v, 0.16) if dark else base.v
+	var variant := Color.from_hsv(float(step) / PLACEHOLDER_HUE_STEPS, 0.30 if dark else 0.12, value)
+	return base.lerp(variant, 0.65)
 
 static func _tinted_placeholder_texture(id: String) -> Texture2D:
+	_sync_placeholder_theme()
 	if id == "":
 		return _placeholder_texture
 	var step := absi(hash(id)) % PLACEHOLDER_HUE_STEPS
@@ -59,7 +79,7 @@ static func _tinted_placeholder_texture(id: String) -> Texture2D:
 
 static func _create_placeholder_texture() -> Texture2D:
 	var img := Image.create(2, 2, false, Image.FORMAT_RGBA8)
-	img.fill(Color("#1C1B1F"))
+	img.fill(_placeholder_base_color())
 	return ImageTexture.create_from_image(img)
 
 var _loading_texture: Texture2D = _placeholder_texture
@@ -161,6 +181,7 @@ func _sync_focus_state_from_viewport() -> void:
 		return
 	_is_focused = real_focus
 	_sync_focus_visuals()
+	_apply_text_settings()
 	# If this card is focused but has no focus stack yet, build it now so the
 	# subsequent media-stack rebuild can see the correct focus state.
 	if _is_focused and not _focus_stack:
@@ -475,6 +496,7 @@ var preview_show_focus: bool = false
 
 func set_preview_focus(p_show: bool) -> void:
 	preview_show_focus = p_show
+	_apply_text_settings()
 	_show_focus_effects(p_show)
 
 func _show_focus_effects(p_show: bool) -> void:
@@ -556,6 +578,51 @@ func _show_focus_effects(p_show: bool) -> void:
 
 var _display_mode: int = 0
 
+func _is_focused_only_enabled() -> bool:
+	var state = UIManager.card_settings_state if UIManager else null
+	if state:
+		return state.text_focused_only
+	if DataManager:
+		var setting = DataManager.get_setting("library_card_text_focused_only")
+		return setting != null and setting.value is bool and setting.value
+	return false
+
+## Apply render-only text state. Source strings remain intact so these options
+## never change text measurement, media bounds, or recycled-card layout.
+func _apply_text_settings() -> void:
+	var show_platform := true
+	var alignment := 0
+	var scroll_truncation := false
+	var focused_only := _is_focused_only_enabled()
+	var state = UIManager.card_settings_state if UIManager else null
+	if state:
+		show_platform = state.show_platform
+		alignment = state.text_alignment
+		scroll_truncation = state.scroll_truncation
+	elif DataManager:
+		var platform_setting = DataManager.get_setting("library_card_show_platform")
+		if platform_setting and platform_setting.value is bool:
+			show_platform = platform_setting.value
+		var alignment_setting = DataManager.get_setting("library_card_text_alignment")
+		if alignment_setting and alignment_setting.value is int:
+			alignment = alignment_setting.value
+		var scroll_setting = DataManager.get_setting("library_card_scroll_truncation")
+		if scroll_setting and scroll_setting.value is bool:
+			scroll_truncation = scroll_setting.value
+
+	var focused := preview_show_focus if preview_mode else _is_focused
+	text_alignment = clampi(alignment, 0, 3) as M3Card.TextAlignment
+	supporting_text_visible = show_platform
+	# In Focused Only the title lives in the grid-owned pill, never inline.
+	scroll_truncated_text = scroll_truncation and not focused_only
+	text_content_visible = not focused_only
+	text_focused = focused and not focused_only
+
+## Lightweight entry point for CardSettingsState.ChangeMask.TEXT.
+func refresh_text_settings() -> void:
+	_apply_text_settings()
+	_update_card_text()
+
 func _update_card_state_from_settings():
 	if not _media_container:
 		return
@@ -585,7 +652,7 @@ func _update_card_state_from_settings():
 		# Apply the same rounding to the M3Card background clip
 		card_rounding_ratio = _media_container.corner_radius_ratio
 
-		_display_mode = state.display_mode
+		_display_mode = state.get_effective_display_mode()
 	elif DataManager:
 		# Fallback if UIManager state is not yet available
 		var config_setting = DataManager.get_setting("card_effect_config")
@@ -608,8 +675,11 @@ func _update_card_state_from_settings():
 		var display_setting = DataManager.get_setting("library_card_display_mode")
 		if display_setting and display_setting.value is int:
 			_display_mode = display_setting.value
+		if _is_focused_only_enabled():
+			_display_mode = 2
 
 	_apply_display_mode()
+	_apply_text_settings()
 	_sync_focus_container_properties()
 
 func _apply_display_mode() -> void:
@@ -634,7 +704,9 @@ func _apply_display_mode() -> void:
 			# they keep their title, centered over the whole card instead.
 			# Wrapped (unopened) games stay textless so the title doesn't draw
 			# over the present wrap.
-			var no_cover := game != null and not game.has_cover_art and not _is_present_wrapped()
+			# Focused Only suppresses the coverless inline fallback as well; the
+			# grid's floating pill is the sole title presentation in that mode.
+			var no_cover := not _is_focused_only_enabled() and game != null and not game.has_cover_art and not _is_present_wrapped()
 			show_text_margin = no_cover
 			text_centered_overlay = no_cover
 
@@ -647,7 +719,7 @@ func _apply_display_mode() -> void:
 # recycled card, without paying for a full _apply_display_mode() when the
 # state is unchanged.
 func _sync_media_only_text_fallback() -> void:
-	if _display_mode != 2:
+	if _display_mode != 2 or _is_focused_only_enabled():
 		return
 	var no_cover := game != null and not game.has_cover_art and not _is_present_wrapped()
 	if show_text_margin == no_cover and text_centered_overlay == no_cover:
@@ -657,6 +729,17 @@ func _sync_media_only_text_fallback() -> void:
 func set_focus_scale(value: float) -> void:
 	focus_scale = maxf(value, 1.0)
 	_sync_focus_visuals()
+
+func refresh_theme() -> void:
+	super.refresh_theme()
+	# Keep real cover art untouched; only rebind cards currently displaying the
+	# shared loading/no-cover texture. _tinted_placeholder_texture also rebuilds
+	# the static cache once when the palette changes.
+	var rebind_loading := game != null and not _is_placeholder \
+		and (_current_texture == null or _current_texture == _loading_texture)
+	_loading_texture = _tinted_placeholder_texture(game.id if game else "")
+	if rebind_loading and is_node_ready():
+		_set_texture(_loading_texture)
 
 func refresh_settings() -> void:
 	_refresh_card_visuals()
@@ -704,6 +787,23 @@ func _sync_compositor_transform() -> void:
 		return
 	var parent := _visual_layer_rid if _uses_visual_layer() else _media_canvas_item
 	_media_stack.sync_compositor(_last_media_transform, parent, m3_get_compositor_draw_index())
+	_apply_compositor_opacity()
+
+func _apply_visual_layer_opacity() -> void:
+	super._apply_visual_layer_opacity()
+	_apply_compositor_opacity()
+
+func _apply_compositor_opacity() -> void:
+	if not _media_stack or not _media_stack.is_compositor_enabled():
+		return
+	# The compositor is a sibling of the media canvas item, so it does not
+	# inherit the opacity applied to the ordinary media/effect hierarchy.
+	var compositor_rid := _media_stack.get_composition_parent_rid(_media_canvas_item)
+	if compositor_rid.is_valid():
+		# Self modulation fades the composited output without also passing the
+		# opacity down to child effects, which would apply the fade twice.
+		RenderingServer.canvas_item_set_modulate(compositor_rid, Color.WHITE)
+		RenderingServer.canvas_item_set_self_modulate(compositor_rid, Color(1.0, 1.0, 1.0, _visual_layer_opacity))
 
 func sync_visual_transform_with_offset(base_offset: Vector2) -> void:
 	super.sync_visual_transform_with_offset(base_offset)
@@ -733,6 +833,8 @@ func reset(for_pooling: bool = false) -> void:
 	avoids the empty-card flash when the grid recycles during zoom/resize."""
 	game = null
 	_is_focused = false
+	_reset_text_scroll()
+	_apply_text_settings()
 	_media_loading = false
 	set_placeholder(false)
 	# Clear hold state so a recycled card can't fire a stale long-press or
@@ -883,8 +985,7 @@ func _update_display():
 	_update_platform_badge()
 	_update_present_wrap()
 	_load_cover(false)
-	headline = game.title
-	supporting_text = game.platform if game.platform else ""
+	_update_card_text()
 	_sync_media_only_text_fallback()
 
 func _update_display_with_priority(high_priority: bool):
@@ -898,8 +999,7 @@ func _update_display_with_priority(high_priority: bool):
 		_set_texture(_current_texture)
 	else:
 		_load_cover(high_priority)
-	headline = game.title
-	supporting_text = game.platform if game.platform else ""
+	_update_card_text()
 	_sync_media_only_text_fallback()
 
 func _deferred_update_platform_badge():
@@ -1426,6 +1526,7 @@ func _sync_focus_visuals() -> void:
 
 func _on_focus_entered():
 	_is_focused = true
+	_apply_text_settings()
 
 	# Build the focus stack lazily the first time this card is focused.
 	if not _focus_stack:
@@ -1463,6 +1564,7 @@ func _on_focus_entered():
 
 func _on_focus_exited():
 	_is_focused = false
+	_apply_text_settings()
 	z_index = 1
 	_kill_focus_tweens()
 	if _focus_tween:

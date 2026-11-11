@@ -137,5 +137,5 @@ void fragment() {
 	// Calculate brightness of glow for alpha
 	glow_alpha *= lum * knee * glow_intensity * effect_alpha;
 
-	COLOR = vec4(glow_color, glow_alpha);
+	COLOR = vec4(glow_color, glow_alpha) * COLOR;
 }

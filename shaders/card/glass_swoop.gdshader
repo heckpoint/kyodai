@@ -84,5 +84,5 @@ void fragment() {
 	vec3 final_color = swoop_color.rgb;
 	float final_alpha = alpha * edge_alpha * swoop_color.a * effect_alpha;
 
-	COLOR = vec4(final_color, final_alpha);
+	COLOR = vec4(final_color, final_alpha) * COLOR;
 }

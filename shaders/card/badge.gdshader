@@ -222,5 +222,5 @@ void fragment() {
 		discard;
 	}
 	
-	COLOR = final_color;
+	COLOR = final_color * COLOR;
 }

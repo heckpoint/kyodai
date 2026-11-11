@@ -107,5 +107,5 @@ void fragment() {
 	}
 	
 	tex_color.a *= final_alpha * alpha;
-	COLOR = tex_color;
+	COLOR = tex_color * COLOR;
 }

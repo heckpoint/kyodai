@@ -63,5 +63,5 @@ void fragment() {
 	vec2 tex_size = vec2(textureSize(game_texture, 0));
 	vec4 tex_color = sample_blur(tex_uv, tex_size);
 	
-	COLOR = vec4(tex_color.rgb, tex_color.a * edge_alpha * effect_alpha);
+	COLOR = vec4(tex_color.rgb, tex_color.a * edge_alpha * effect_alpha) * COLOR;
 }

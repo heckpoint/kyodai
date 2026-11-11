@@ -160,6 +160,12 @@ static func _preset(s: SettingsVar) -> SettingsVar:
 @export var library_focus_ring_thickness := _preset(SettingsVar.new(Type.FLOAT, 3.0, State.ENABLED, "Focus Ring Thickness", "Stroke width of the focus ring in dp", 1.0, 8.0, 0.5))
 @export var library_focus_ring_shape := _preset(SettingsVar.new(Type.ARRAY, 0, State.ENABLED, "Focus Ring Shape", "Full draws the complete rounded ring; Corners draws only crosshair-style corner ticks", 0.0, 1.0, 1.0, ["Full", "Corners"]))
 @export var library_card_content_alignment := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Content Alignment", "How card content is positioned within the card cell", 0.0, 2.0, 1.0, ["Left/Top", "Center/Middle", "Right/Bottom"]))
+@export var library_card_show_platform := _preset(SettingsVar.new(Type.BOOL, true, State.INTERNAL, "Show Platform", "Display the platform as supporting text on game cards"))
+# Follow Content preserves the alignment supplied by Content Alignment until
+# the user explicitly chooses a text-only alignment from the toolbar.
+@export var library_card_text_alignment := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Text Alignment", "How title and platform text align within the card's text bounds", 0.0, 3.0, 1.0, ["Follow Content", "Left", "Center", "Right"]))
+@export var library_card_scroll_truncation := _preset(SettingsVar.new(Type.BOOL, false, State.INTERNAL, "Scroll Truncation", "Scroll overflowing title and platform text while its card is focused"))
+@export var library_card_text_focused_only := _preset(SettingsVar.new(Type.BOOL, false, State.INTERNAL, "Focused Only", "Hide title and platform text on every unfocused game card"))
 @export var card_media_aspect_ratio := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Card Media Ratio", "Aspect ratio of the card's media panel", 0.0, 4.0, 1.0, ["Fill", "2:3", "3:4", "1:1", "16:11"]))
 @export var library_card_display_mode := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Card Display Mode", "How game cards appear in the library", 0.0, 2.0, 1.0, ["Standard", "Transparent", "Media Only"]))
 @export var library_primary_color := _preset(SettingsVar.new(Type.COLOR, Color.WHITE, State.ENABLED, "Accent Color", "Primary color for the Material 3 interface theme"))

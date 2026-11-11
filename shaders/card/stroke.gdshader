@@ -49,5 +49,5 @@ void fragment() {
 	if (fade_in) {
 		fade_alpha = 1.0 - clamp(-outer_dist / stroke_width_pixels, 0.0, 1.0);
 	}
-	COLOR = vec4(color.rgb, color.a * ring_alpha * fade_alpha * effect_alpha);
+	COLOR = vec4(color.rgb, color.a * ring_alpha * fade_alpha * effect_alpha) * COLOR;
 }

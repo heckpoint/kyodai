@@ -1,6 +1,8 @@
 class_name GridVisualSync
 extends Node
 
+const FocusedTitlePill = preload("res://base_class/nodes/grid/grid_focused_title_pill.gd")
+
 ## Owns the grid's top-level visual layer and the per-frame visual stamping
 ## pipeline: layer-space offset computation, pre-draw stamping, the
 ## reveal-on-sort gate, the scroll-completed rest stamp, and the visual draw
@@ -15,6 +17,9 @@ var _grid: VirtualScrollGridContainer = null
 ## Top-level layer the cards' RS items render into (draws outside the grid's
 ## bounds without being clipped by margins or scroll).
 var layer: Control = null
+var _focused_title_layer: Control = null
+var _focused_title_pill: GridFocusedTitlePill = null
+var _pill_draw_index: int = -1
 
 ## Position of the flow's content origin within the margin container, captured
 ## post-sort from Godot's own container results (center position + flow
@@ -67,6 +72,21 @@ func _ready() -> void:
 		_grid.add_child(layer)
 		layer.position = Vector2.ZERO
 		layer.size = get_viewport().get_visible_rect().size
+		# The pill needs a separate, higher canvas subtree: the card layer is
+		# deliberately behind grid chrome, while the title must float above it.
+		_focused_title_layer = Control.new()
+		_focused_title_layer.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		_focused_title_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_focused_title_layer.clip_contents = false
+		_focused_title_layer.top_level = true
+		_focused_title_layer.z_as_relative = false
+		_focused_title_layer.z_index = OverlayLayers.TOOLBAR_Z + 20
+		_grid.add_child(_focused_title_layer)
+		_focused_title_layer.position = Vector2.ZERO
+		_focused_title_layer.size = layer.size
+		_focused_title_pill = FocusedTitlePill.new()
+		_focused_title_layer.add_child(_focused_title_pill)
+		_focused_title_pill.set_visual_layer(_focused_title_layer)
 
 func _enter_tree() -> void:
 	# _ready fires only once per node lifetime, so the reconnect must live
@@ -77,6 +97,7 @@ func _enter_tree() -> void:
 		RenderingServer.frame_pre_draw.connect(_on_frame_pre_draw)
 
 func _exit_tree() -> void:
+	_hide_focused_title_pill()
 	if RenderingServer.frame_pre_draw.is_connected(_on_frame_pre_draw):
 		RenderingServer.frame_pre_draw.disconnect(_on_frame_pre_draw)
 
@@ -89,10 +110,98 @@ func resize_to_viewport() -> void:
 	if layer and layer.top_level and _grid.is_inside_tree():
 		layer.position = Vector2.ZERO
 		layer.size = _grid.get_viewport().get_visible_rect().size
+	if _focused_title_layer and _focused_title_layer.top_level and _grid.is_inside_tree():
+		_focused_title_layer.position = Vector2.ZERO
+		_focused_title_layer.size = _grid.get_viewport().get_visible_rect().size
 
 func configure_card(card: Control) -> void:
 	if card.has_method("set_visual_layer"):
 		card.set_visual_layer(layer)
+
+func _hide_focused_title_pill() -> void:
+	if is_instance_valid(_focused_title_pill):
+		_focused_title_pill.hide_pill()
+
+## Keep the single title pill bound to the actual focused GameCard. This runs
+## even when card stamping is idle so focus-scale tweens still move the bubble.
+func _sync_focused_title_pill() -> void:
+	if not is_instance_valid(_focused_title_pill) or not _focused_title_layer:
+		return
+	var state = UIManager.card_settings_state if UIManager else null
+	if not state or not state.text_focused_only or not _grid.is_visible_in_tree() or _grid._active_cards.is_empty():
+		_hide_focused_title_pill()
+		return
+
+	var focused_index := _grid._focus.focused_virtual_index()
+	var card = _grid._active_cards_by_index.get(focused_index, null)
+	if not is_instance_valid(card) or not card is GameCard or not card.game:
+		_hide_focused_title_pill()
+		return
+	var title: String = card.game.title
+	if title.is_empty():
+		_hide_focused_title_pill()
+		return
+
+	var geometry: Dictionary = card.m3_get_media_render_geometry()
+	var media_rect: Rect2 = geometry.get("rect", Rect2())
+	if media_rect.size.x <= 0.0 or media_rect.size.y <= 0.0:
+		_hide_focused_title_pill()
+		return
+
+	var margin := M3Units.dp(8.0)
+	var gap := M3Units.dp(10.0)
+	var viewport_max := maxf(M3Units.dp(32.0), _focused_title_layer.size.x - margin * 2.0)
+	# Width is based on the unscaled media so it does not breathe with the
+	# focus tween; the anchor rect below does include the current focus scale.
+	var max_width := minf(maxf(M3Units.dp(32.0), card._media_bounds.size.x), viewport_max)
+	_focused_title_pill.configure(title, max_width, state.text_alignment, state.scroll_truncation)
+
+	var pill_size := _focused_title_pill.custom_minimum_size
+	var x := media_rect.get_center().x - pill_size.x * 0.5
+	x = clampf(x, margin, maxf(margin, _focused_title_layer.size.x - pill_size.x - margin))
+	var tail_height := _focused_title_pill.get_tail_height()
+	var tail_points_down := true
+	var tail_visible := true
+	var y := media_rect.position.y - pill_size.y - tail_height - gap
+	if y < margin:
+		tail_points_down = false
+		y = media_rect.end.y + gap + tail_height
+		if y + pill_size.y > _focused_title_layer.size.y - margin:
+			# Very tall cards can lack external space on both sides. Keep the
+			# title readable as an overlay just inside the media's top edge.
+			tail_visible = false
+			y = maxf(margin, media_rect.position.y + gap)
+	_focused_title_pill.set_tail_state(tail_points_down, tail_visible)
+
+	var draw_index: int = card.m3_get_focus_draw_index() + 1
+	if draw_index != _pill_draw_index:
+		_pill_draw_index = draw_index
+		_focused_title_pill.set_visual_draw_index(draw_index)
+	var pill_position := Vector2(x, y)
+	_focused_title_pill.position = pill_position
+	_focused_title_pill.sync_visual_transform_with_offset(pill_position)
+	_focused_title_pill._mark_visuals_position_synced()
+	_focused_title_pill.show_pill()
+
+func update_pagination_opacity() -> void:
+	if _grid._active_cards.is_empty() or not _grid._card_has_visual_layer_opacity:
+		return
+	var current_page := -1
+	if _grid._is_pagination_active() and _grid._scroll_container:
+		_grid._sync_geometry()
+		var period: float = _grid._geometry.page_period()
+		if period > 0.0:
+			var scroll_pos := _grid._scroll_container.get_scroll_float()
+			current_page = clampi(int(round(scroll_pos / period)), 0, _grid._geometry.page_count() - 1)
+	for card in _grid._active_cards:
+		if not is_instance_valid(card):
+			continue
+		var opacity := 1.0
+		if current_page >= 0:
+			var idx: int = card.get_meta("virtual_index", -1)
+			if idx >= 0 and _grid._geometry.page_for_index(idx) != current_page:
+				opacity = _grid.PAGINATION_NEIGHBOR_OPACITY
+		card.set_visual_layer_opacity(opacity)
 
 func on_scroll_completed() -> void:
 	"""Stamp all cards against the final rest position. The terminal write of
@@ -116,6 +225,8 @@ func on_scroll_completed() -> void:
 		if not is_instance_valid(card) or not card.is_node_ready():
 			continue
 		card.sync_visual_transform_with_offset(compute_offset(card, context))
+	update_pagination_opacity()
+	_sync_focused_title_pill()
 
 func _on_frame_pre_draw() -> void:
 	# Stamp visual offsets at the last moment before render, from pure
@@ -123,14 +234,17 @@ func _on_frame_pre_draw() -> void:
 	# window membership are all final for the frame, so the stamps are
 	# render-fresh by construction — independent of sort/flush/deferred order.
 	if not _grid or not _grid._card_has_sync_visual_offset or not _grid._scroll_container or not layer:
+		_hide_focused_title_pill()
 		return
 	# Hidden grids (inactive view tabs) don't draw — stamping is wasted work
 	# and, worse, consumes a pending reveal while invisible. The skip-cache is
 	# untouched while hidden, so the first pre-draw after re-show detects the
 	# interruption and stamps/marks before that frame renders (no flash).
 	if not _grid.is_visible_in_tree():
+		_hide_focused_title_pill()
 		return
 	if _grid._active_cards.size() == 0:
+		_hide_focused_title_pill()
 		return
 	# Skip the stamp loop entirely when nothing that feeds the offset math
 	# changed since the last stamp (idle frames far outnumber scroll frames).
@@ -145,6 +259,7 @@ func _on_frame_pre_draw() -> void:
 		and context.layer_origin.is_equal_approx(_last_stamp_layer_origin) \
 		and context.chain.is_equal_approx(_last_stamp_chain)
 	if not _reveal_pending and origins_unchanged and scroll_now == _last_stamp_scroll and margin_now == _last_stamp_margin and first_now == _last_stamp_first and _grid._active_cards.size() == _last_stamp_count and _grid._layout_generation == _last_stamp_generation:
+		_sync_focused_title_pill()
 		return
 	# A pending reveal means a sort cascade is (or was) in flight. Pre-draw runs
 	# after the ENTIRE cascade (margin -> center -> flow), so positions and the
@@ -169,6 +284,8 @@ func _on_frame_pre_draw() -> void:
 		card.sync_visual_transform_with_offset(expected_offset)
 		if do_reveal and _grid._card_has_mark_visuals_position_synced:
 			card._mark_visuals_position_synced()
+	update_pagination_opacity()
+	_sync_focused_title_pill()
 
 func _capture_offset_context() -> Dictionary:
 	# Loop-invariant inputs are captured once per stamp, not queried again for
@@ -225,6 +342,8 @@ func stamp_and_mark(_tag: String = "", mark: bool = true) -> void:
 		# position can never reach the screen even if the heal slips a frame.
 		if mark and _grid._card_has_mark_visuals_position_synced:
 			card._mark_visuals_position_synced()
+	update_pagination_opacity()
+	_sync_focused_title_pill()
 
 ## Capture the content chain post-sort (called from the grid's sort handlers
 ## after they bump the layout generation).

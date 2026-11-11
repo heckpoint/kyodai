@@ -228,6 +228,10 @@ var grid_outer_margin: int = 0
 ## When true (GRID mode only), the grid is split into viewport-sized pages
 ## separated by spacer lines in the flow; scrolling snaps between pages.
 var pagination_enabled: bool = false
+## Scroll-axis amount of the adjacent page visible at a snapped page position.
+const PAGINATION_PREVIEW_DP := 24.0
+## Opacity of adjacent-page cards; the page nearest the snap target stays opaque.
+const PAGINATION_NEIGHBOR_OPACITY := 0.35
 
 ## When true (vertical GRID only), every other row is offset by half a card
 ## width (brick pattern); offset rows hold one fewer card via a leading
@@ -291,6 +295,7 @@ func _sync_geometry() -> void:
 	_geometry.separation = grid_separation
 	_geometry.staggered = _is_staggered_active()
 	_geometry.paginated = _is_pagination_active()
+	_geometry.page_preview = M3Units.dp(PAGINATION_PREVIEW_DP)
 	_geometry.items_per_line = _get_items_per_line()
 	_geometry.stride = _get_normal_stride()
 	_geometry.card_scroll = card_size.y if vertical else card_size.x
@@ -475,6 +480,7 @@ var _card_has_refresh_effects: bool = false
 var _card_has_update_card_state_from_settings: bool = false
 var _card_has_sync_visual_transform: bool = false
 var _card_has_sync_visual_offset: bool = false
+var _card_has_visual_layer_opacity: bool = false
 var _card_has_mark_visuals_position_synced: bool = false
 var _card_has_unmark_visuals_position_synced: bool = false
 var _card_has_show_loading_skeleton: bool = false
@@ -957,6 +963,10 @@ func _on_card_settings_state_changed(mask: int) -> void:
 		if debug_mode:
 			if DEBUG_LOG: print("[Grid] after LAYOUT batch, target_ratio=", target_card_width_ratio, " card_size=", card_size, " base_card_size=", base_card_size)
 
+	# Text-only options do not alter geometry or effects.
+	if mask & CardSettingsState.ChangeMask.TEXT:
+		refresh_all_card_displays()
+
 	# Display mode / content alignment / media aspect ratio
 	if mask & (CardSettingsState.ChangeMask.DISPLAY | CardSettingsState.ChangeMask.MEDIA_SHAPE):
 		refresh_all_card_configs()
@@ -993,7 +1003,7 @@ func _refresh_cached_settings() -> void:
 	var state = UIManager.card_settings_state
 	var idx = clampi(state.media_aspect_ratio, 0, _RATIO_LOOKUP.size() - 1)
 	_cached_media_aspect_ratio = _RATIO_LOOKUP[idx]
-	_cached_card_display_mode = clampi(state.display_mode, 0, 2)
+	_cached_card_display_mode = clampi(state.get_effective_display_mode(), 0, 2)
 	_cached_content_alignment = clampi(state.content_alignment, 0, 2) as M3Card.ContentAlignment
 	_focus_centering_mode = clampi(state.focus_centering_mode, 0, 1)
 	# Converge the pagination flag with the shared state. Grids otherwise only
@@ -1373,9 +1383,8 @@ func _is_pagination_active() -> bool:
 func _is_staggered_active() -> bool:
 	return staggered and view_mode == ViewMode.GRID and vertical
 
-## Blank space between page groups in the scroll direction: the leftover slack
-## plus one full stride, so the next page always starts beyond the viewport's
-## far edge and neighbors are never visible at rest (no culling needed).
+## Blank space between page groups in the scroll direction, sized to reveal
+## PAGINATION_PREVIEW_DP of adjacent pages at snapped positions when space allows.
 func _get_page_gap() -> float:
 	_sync_geometry()
 	return _geometry.page_gap()
@@ -1644,7 +1653,7 @@ func _recalculate_layout():
 	# feed into card_geometry_changed. Cache them explicitly so a recalc that
 	# runs after these settings change cannot be skipped incorrectly.
 	var state = UIManager.card_settings_state if UIManager else null
-	var current_display_mode = state.display_mode if state else _cached_card_display_mode
+	var current_display_mode = state.get_effective_display_mode() if state else _cached_card_display_mode
 	var current_media_ratio = state.media_aspect_ratio if state else 0
 	var display_or_ratio_changed = current_display_mode != _last_layout_display_mode or current_media_ratio != _last_layout_media_aspect_ratio
 
@@ -2126,6 +2135,7 @@ func _apply_capability_flags(flags: Dictionary) -> void:
 	_card_has_update_card_state_from_settings = flags["update_card_state_from_settings"]
 	_card_has_sync_visual_transform = flags["sync_visual_transform"]
 	_card_has_sync_visual_offset = flags["sync_visual_offset"]
+	_card_has_visual_layer_opacity = flags["visual_layer_opacity"]
 	_card_has_mark_visuals_position_synced = flags["mark_visuals_position_synced"]
 	_card_has_unmark_visuals_position_synced = flags["unmark_visuals_position_synced"]
 	_card_has_show_loading_skeleton = flags["show_loading_skeleton"]
@@ -3332,8 +3342,7 @@ func refresh_all_card_configs() -> void:
 			card._update_media_panel_size(true)
 
 func refresh_all_card_displays() -> void:
-	"""Refresh text/display state on all active cards without rebuilding effects.
-	Used for settings like library_show_title_mode."""
+	"""Refresh render-only text state without rebuilding media, effects, or layout."""
 	for card in _active_cards:
-		if is_instance_valid(card) and _card_has_update_display:
-			card.update_display()
+		if is_instance_valid(card) and card.has_method("refresh_text_settings"):
+			card.refresh_text_settings()
