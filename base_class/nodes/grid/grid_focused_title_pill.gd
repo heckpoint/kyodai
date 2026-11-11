@@ -29,7 +29,8 @@ func _init() -> void:
 	text_centered_overlay = false
 	supporting_text_visible = false
 	card_rounding_ratio = 1.0
-	bg_color_override = M3Theme.get_surface_container()
+	headline_font_weight = "bold"
+	_update_contrast_colors()
 	visible = false
 
 func _ready() -> void:
@@ -47,7 +48,7 @@ func configure(title: String, max_width: float, alignment: int, scroll_enabled: 
 	_configured_scroll = scroll_enabled
 
 	var fonts := M3Theme.load_fonts()
-	var font: Font = fonts.get("medium", fonts.get("regular"))
+	var font: Font = fonts.get("bold", fonts.get("medium", fonts.get("regular")))
 	var font_size := int(M3Units.dp(TITLE_FONT_SIZE_DP))
 	var text_width := font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x if font else 0.0
 	var maximum := maxf(M3Units.dp(32.0), max_width)
@@ -110,8 +111,22 @@ func _redraw_visual_background(rect: Rect2) -> void:
 		PackedVector2Array()
 	)
 
+func _update_contrast_colors() -> void:
+	# Fully opaque contrast: white on light, black on dark.
+	bg_color_override = Color.BLACK if M3Theme.is_dark_mode else Color.WHITE
+	headline_color_override = Color.WHITE if M3Theme.is_dark_mode else Color.BLACK
+
+func _configure_stylebox_for_state() -> void:
+	super._configure_stylebox_for_state()
+	# This small overlay must stay truly black/white even when Frosted Look is
+	# enabled. Do not let the generic card frosted cap/material alter it.
+	_cached_stylebox.bg_color.a = 1.0
+	if _visual_bg_canvas_item.is_valid():
+		RenderingServer.canvas_item_set_material(_visual_bg_canvas_item, RID())
+	_frosted_applied = false
+
 func refresh_theme() -> void:
-	bg_color_override = M3Theme.get_surface_container()
+	_update_contrast_colors()
 	super.refresh_theme()
 	# Font or UI-scale changes can alter the hug width even when the title and
 	# focused card are unchanged.

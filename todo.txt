@@ -5,6 +5,7 @@ ship w music
 Docs: there is no docs/ folder and no AGENTS.md; todo.txt
 flex-grid sizes and card widgets (random, etc..)
 guides, hl2b, playtime in gui
+transform effect
 
 ## romm (prs):
 	-romm extract rom metadata & icons https://github.com/rommapp/romm/pull/5556
@@ -28,8 +29,6 @@ guides, hl2b, playtime in gui
 	focus color (glow, mirror)
 	x "case wrap" card effect (spine + label, maybe varying by platform?)
 	3d case effect
-	text
-		- only game title for focused option (speech bubble?)
 	m3 master color sync with game/platform?
 	panels/layouts/draggable ui elements? (split containers?)
 	color presets (platform/game/custom)

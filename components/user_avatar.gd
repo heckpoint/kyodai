@@ -16,13 +16,13 @@ extends Control
 const SIZE_DP := 56
 
 ## Ring width as a ratio of the avatar width (media inset revealing the disc).
-const BORDER_RATIO := 0.07
+const BORDER_RATIO := 0.05
 
 ## Ring/disc color.
 const BORDER_COLOR := Color.WHITE
 
 ## Center-crop factor applied before upload so the subject fills the circle.
-const CENTER_CROP := 0.75
+const CENTER_CROP := 0.70
 
 ## Sources at or below this width are treated as pixel art and sampled with
 ## nearest-neighbor filtering so they stay crisp; larger sources use linear.
@@ -133,8 +133,11 @@ func clear_avatar() -> void:
 		_stack.set_visible(false)
 	_fallback_icon.visible = true
 
-func _exit_tree() -> void:
-	if _stack:
+func _notification(what: int) -> void:
+	# Layout/navigation changes can reparent this control without destroying it.
+	# Keep the effect stack alive across those tree exits and release its RIDs
+	# only on final deletion; _ready() is not called again on re-entry.
+	if what == NOTIFICATION_PREDELETE and _stack:
 		_stack.free_rids()
 		_stack = null
 

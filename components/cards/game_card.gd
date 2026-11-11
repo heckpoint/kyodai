@@ -1337,6 +1337,9 @@ func _on_card_gui_input(event: InputEvent) -> void:
 		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			if game and UIManager:
 				UIManager.show_game_context_menu(game.romm_id, self, _get_show_delete(), _is_in_home_view())
+				# Keep card context clicks exclusive; otherwise the same event can
+				# bubble to View and replace this menu with the background menu.
+				accept_event()
 
 func _on_card_mouse_entered() -> void:
 	if not _can_accept_focus():
@@ -1488,10 +1491,16 @@ func _apply_content_scale() -> void:
 	super._apply_content_scale()
 	_update_effect_transforms()
 
+func _focus_effects_use_media_bounds() -> bool:
+	# Wide List cards must always glow around the media panel, never around
+	# the empty text region. Other layouts preserve their existing Standard
+	# display-mode behavior; cards without valid media fall back to full bounds.
+	return _media_bounds.size.x > 0.0 and _media_bounds.size.y > 0.0 \
+		and (not show_background or card_layout_mode == M3Card.LayoutMode.HORIZONTAL)
+
 func _update_effect_transforms() -> void:
-	# The focus stack is parented to the card's canvas item, so it inherits
-	# the card's offset-transform scale. We only need to translate it to the
-	# media region when in transparent/media-only mode.
+	# The focus stack inherits the card's visual-layer transform. Translate it
+	# into the media region whenever its effect bounds are media-local.
 	if not _focus_stack:
 		return
 	var ci = _focus_stack._stack_canvas_item
@@ -1499,7 +1508,7 @@ func _update_effect_transforms() -> void:
 		return
 
 	var t := Transform2D()
-	if not show_background:
+	if _focus_effects_use_media_bounds():
 		t = Transform2D().translated(_media_bounds.position)
 	RenderingServer.canvas_item_set_transform(ci, t)
 
@@ -1589,7 +1598,7 @@ func _update_focus_stack_bounds() -> void:
 		return
 	# Effect geometry is always local to its surface. Media offset belongs only
 	# to the shared render transform, not to the bounds themselves.
-	var new_bounds := Rect2(Vector2.ZERO, _media_bounds.size) if not show_background else Rect2(Vector2.ZERO, _get_content_size())
+	var new_bounds := Rect2(Vector2.ZERO, _media_bounds.size) if _focus_effects_use_media_bounds() else Rect2(Vector2.ZERO, _get_content_size())
 
 	var bounds_changed := not _focus_media_container.bounds.is_equal_approx(new_bounds)
 	_focus_media_container.bounds = new_bounds

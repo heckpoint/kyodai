@@ -1,13 +1,15 @@
 class_name CafeOSBackgroundEffect
 extends BackgroundEffect
 
+# The raymarched 3D effect is GPU-heavy; render at half resolution and let
+# the host upscale. Initialized here so the host sees it before _ready().
+func _init():
+	render_scale = 0.5
+
 func _ready():
 	super._ready()
 	effect_name = "CafeOS"
 	effect_id = "cafeos"
-	# The raymarched 3D effect is GPU-heavy; render at half resolution and let
-	# the host upscale (the effect is soft by design, so the loss is invisible).
-	render_scale = 0.5
 
 func _setup_shader() -> void:
 	var mat = material as ShaderMaterial

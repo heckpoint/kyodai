@@ -3495,12 +3495,14 @@ func _schedule_startup_dirty_sweep() -> void:
 		return
 	print("[GameSaveSubManager] Startup sweep: unsynced local save for " + dirty.game.get_display_name())
 	var choice = await _show_dirty_sweep_dialog([dirty])
-	if choice != "upload":
-		return
-	auto_upload_saves_for_game(dirty.game, dirty.emulator_id)
+	match choice:
+		"upload":
+			auto_upload_saves_for_game(dirty.game, dirty.emulator_id)
+		"discard":
+			await _discard_dirty_save_changes(dirty)
 
-## Returns {game, emulator_id} when the most recently launched game has a
-## local save whose hash differs from the recorded sync boundary, else {}.
+## Returns {game, emulator_id, local, sync_record} when the most recently
+## launched game has a local save whose hash differs from its sync boundary.
 func _check_most_recent_save_dirty() -> Dictionary:
 	# Android restricted-path scans can't thread (KyodaiBridge), so resolve
 	# the context inline there: the save dir decides whether the unit threads.
@@ -3543,7 +3545,7 @@ func _check_most_recent_save_dirty() -> Dictionary:
 			var hash_info := _compute_local_save_hash(c.emulator_id, c.game, save)
 			if hash_info.hash != "" and hash_info.hash != rec.local_hash:
 				if DEBUG_LOG: print("[GameSaveSubManager] Startup sweep: dirty save '" + save.file_name + "' for " + c.game.get_display_name() + _hash_detail(hash_info.hash, rec.get("server_hash", ""), rec.local_hash))
-				return {"game": c.game, "emulator_id": c.emulator_id}
+				return {"game": c.game, "emulator_id": c.emulator_id, "local": save, "sync_record": rec}
 		return {}
 	var state := {"done": false, "result": {}}
 	_run_io_task(ctx.get("save_dir", "user://"), work, func(r: Dictionary):
@@ -3585,21 +3587,25 @@ func _resolve_sweep_context() -> Dictionary:
 	}
 
 ## Prompts about saves that drifted from their last sync boundary (sweep).
-## Returns "upload" or "skip" (also "skip" on dismissal).
+## Returns "upload", "discard", or "skip" (also "skip" on dismissal).
 func _show_dirty_sweep_dialog(dirty: Array) -> String:
 	# Share the conflict-dialog serialization so prompts never stack
 	while _conflict_dialog_open:
 		await _conflict_dialog_closed
 	_conflict_dialog_open = true
 
-	var result := {"choice": "skip", "upload_btn": null, "skip_btn": null}
+	var result := {
+		"choice": "skip", "upload_btn": null, "discard_btn": null, "skip_btn": null,
+		"confirm_accept_btn": null, "confirm_cancel_btn": null,
+	}
 	var names := []
 	for entry in dirty:
 		names.append(entry.game.get_display_name())
+	var body_text := "Local save data changed but was never synced to the server (Kyodai may have been closed before sync finished):\n\n" + "\n".join(names) + "\n\nUpload now?"
 
 	var dialog = UIManager.show_custom_dialog(func(sweep_dialog: M3Dialog):
 		sweep_dialog.title_text = "Unsynced Save Data"
-		sweep_dialog.body_text = "Local save data changed but was never synced to the server (Kyodai may have been closed before sync finished):\n\n" + "\n".join(names) + "\n\nUpload now?"
+		sweep_dialog.body_text = body_text
 		sweep_dialog.dismissible = true
 		sweep_dialog.disable_default_action = true
 
@@ -3622,6 +3628,29 @@ func _show_dirty_sweep_dialog(dirty: Array) -> String:
 		)
 		content.add_child(dlg_upload_btn)
 
+		result["discard_btn"] = M3Button.new()
+		var dlg_discard_btn: M3Button = result["discard_btn"]
+		dlg_discard_btn.custom_minimum_size = Vector2(0, M3Units.dp(56))
+		dlg_discard_btn.alignment = HORIZONTAL_ALIGNMENT_CENTER
+		dlg_discard_btn.button_size = M3Button.Size.MEDIUM
+		dlg_discard_btn.button_variant = M3Button.Variant.OUTLINED
+		dlg_discard_btn.text = "Discard Local Changes"
+		dlg_discard_btn.pressed.connect(func():
+			# Confirm inline: opening another dialog would replace (and resolve)
+			# this one instead of stacking above it.
+			sweep_dialog.body_text = "Restore the server copy of " + "\n".join(names) + "?\n\nThe unsynced local changes will be overwritten and cannot be recovered."
+			dlg_upload_btn.visible = false
+			dlg_discard_btn.visible = false
+			result["skip_btn"].visible = false
+			result["confirm_accept_btn"].visible = true
+			result["confirm_cancel_btn"].visible = true
+			result["confirm_accept_btn"].focus_neighbor_bottom = result["confirm_cancel_btn"].get_path()
+			result["confirm_cancel_btn"].focus_neighbor_top = result["confirm_accept_btn"].get_path()
+			# Default to the safe action for keyboard/controller users.
+			result["confirm_cancel_btn"].grab_focus()
+		)
+		content.add_child(dlg_discard_btn)
+
 		result["skip_btn"] = M3Button.new()
 		var dlg_skip_btn: M3Button = result["skip_btn"]
 		dlg_skip_btn.custom_minimum_size = Vector2(0, M3Units.dp(56))
@@ -3635,15 +3664,50 @@ func _show_dirty_sweep_dialog(dirty: Array) -> String:
 		)
 		content.add_child(dlg_skip_btn)
 
+		result["confirm_accept_btn"] = M3Button.new()
+		var dlg_confirm_accept_btn: M3Button = result["confirm_accept_btn"]
+		dlg_confirm_accept_btn.custom_minimum_size = Vector2(0, M3Units.dp(56))
+		dlg_confirm_accept_btn.alignment = HORIZONTAL_ALIGNMENT_CENTER
+		dlg_confirm_accept_btn.button_size = M3Button.Size.MEDIUM
+		dlg_confirm_accept_btn.text = "Discard and Restore"
+		dlg_confirm_accept_btn.visible = false
+		dlg_confirm_accept_btn.pressed.connect(func():
+			result["choice"] = "discard"
+			sweep_dialog.dismiss()
+		)
+		content.add_child(dlg_confirm_accept_btn)
+
+		result["confirm_cancel_btn"] = M3Button.new()
+		var dlg_confirm_cancel_btn: M3Button = result["confirm_cancel_btn"]
+		dlg_confirm_cancel_btn.custom_minimum_size = Vector2(0, M3Units.dp(56))
+		dlg_confirm_cancel_btn.alignment = HORIZONTAL_ALIGNMENT_CENTER
+		dlg_confirm_cancel_btn.button_size = M3Button.Size.MEDIUM
+		dlg_confirm_cancel_btn.button_variant = M3Button.Variant.TEXT
+		dlg_confirm_cancel_btn.text = "Keep Local Save"
+		dlg_confirm_cancel_btn.visible = false
+		dlg_confirm_cancel_btn.pressed.connect(func():
+			sweep_dialog.body_text = body_text
+			dlg_upload_btn.visible = true
+			dlg_discard_btn.visible = true
+			result["skip_btn"].visible = true
+			dlg_confirm_accept_btn.visible = false
+			dlg_confirm_cancel_btn.visible = false
+			dlg_upload_btn.grab_focus()
+		)
+		content.add_child(dlg_confirm_cancel_btn)
+
 		sweep_dialog.content_slot.add_child(content)
 	, Callable())
 
 	await get_tree().process_frame
 	var upload_btn = result["upload_btn"]
+	var discard_btn = result["discard_btn"]
 	var skip_btn = result["skip_btn"]
-	if is_instance_valid(upload_btn) and is_instance_valid(skip_btn):
-		upload_btn.focus_neighbor_bottom = skip_btn.get_path()
-		skip_btn.focus_neighbor_top = upload_btn.get_path()
+	if is_instance_valid(upload_btn) and is_instance_valid(discard_btn) and is_instance_valid(skip_btn):
+		upload_btn.focus_neighbor_bottom = discard_btn.get_path()
+		discard_btn.focus_neighbor_top = upload_btn.get_path()
+		discard_btn.focus_neighbor_bottom = skip_btn.get_path()
+		skip_btn.focus_neighbor_top = discard_btn.get_path()
 		upload_btn.grab_focus()
 
 	await dialog.dismissed
@@ -3653,6 +3717,78 @@ func _show_dirty_sweep_dialog(dirty: Array) -> String:
 
 	print("[GameSaveSubManager] Startup sweep dialog resolved with choice: " + result["choice"])
 	return result["choice"]
+
+## Finds the server copy associated with a dirty save. The recorded remote ID
+## is authoritative; filename/default-slot matching covers older sync records.
+func _find_dirty_remote_save(dirty: Dictionary, remote_saves: Array) -> Dictionary:
+	var local: Dictionary = dirty.get("local", {})
+	var sync_record: Dictionary = dirty.get("sync_record", {})
+	var remote_id := int(sync_record.get("remote_save_id", 0))
+	var local_name := str(local.get("file_name", ""))
+	var fallback: Dictionary = {}
+	for remote in remote_saves:
+		if not remote is Dictionary:
+			continue
+		var slot = remote.get("slot", "")
+		if slot == null:
+			slot = ""
+		if slot != SLOT_DEFAULT:
+			continue
+		if remote_id > 0 and int(remote.get("id", 0)) == remote_id:
+			return remote
+		if fallback.is_empty() and FSM.sanitize_server_filename(str(remote.get("file_name", ""))) == local_name:
+			fallback = remote
+	return fallback
+
+## Restores the server copy of a dirty save. Success is reported only after the
+## existing download path has restored, hashed, confirmed, and recorded the new
+## boundary; every failure leaves local data and the startup warning intact.
+func _discard_dirty_save_changes(dirty: Dictionary) -> bool:
+	var game: GameResource = dirty.get("game", null)
+	var emulator_id := str(dirty.get("emulator_id", ""))
+	if game == null or emulator_id == "" or not dirty.has("local"):
+		return false
+	var sync_key := _save_sync_key(game, emulator_id)
+	if is_save_sync_in_flight(game, emulator_id):
+		SystemManager.notifications.show_notification("Save sync already in progress; local changes were kept", SystemManager.notifications.Type.WARNING)
+		return false
+	_begin_save_sync(sync_key)
+	var state := {"done": false, "success": false, "error": ""}
+	var finish = func(success: bool, message: String = "") -> void:
+		if state.done:
+			return
+		state.success = success
+		state.error = message
+		state.done = true
+
+	_ensure_device_registered(func(success: bool, error: String):
+		if not success:
+			finish.call(false, error)
+			return
+		_fetch_saves_with_device_retry(game, func(remote_saves: Array, fetch_error: String, resolved_device_id: String):
+			if fetch_error != "":
+				finish.call(false, fetch_error)
+				return
+			var remote := _find_dirty_remote_save(dirty, remote_saves)
+			if remote.is_empty():
+				finish.call(false, "No matching server save was found")
+				return
+			var timestamp := Time.get_datetime_string_from_system(true, true)
+			_execute_save_download(game, emulator_id, remote, dirty.local, resolved_device_id, timestamp, func(download_success: bool):
+				finish.call(download_success, "" if download_success else "The server copy could not be restored")
+			)
+		)
+	)
+	while not state.done:
+		await get_tree().process_frame
+	_end_save_sync(sync_key)
+	if state.success:
+		print("[GameSaveSubManager] Startup sweep: discarded local changes and restored server save for " + game.get_display_name())
+		SystemManager.notifications.show_notification("Server save restored; local changes discarded", SystemManager.notifications.Type.INFO)
+	else:
+		push_warning("[GameSaveSubManager] Discard-local restore failed for " + game.get_display_name() + ": " + str(state.error))
+		SystemManager.notifications.show_notification(str(state.error) + ". Local changes were kept.", SystemManager.notifications.Type.ERROR)
+	return state.success
 
 ## Auto-download saves before launch (pre-launch hook)
 ## If on_complete callback is provided, it will be called when sync finishes

@@ -3,7 +3,17 @@ extends Control
 
 ## Library Appearance controls and theme-preset UI.
 
+const FOCUS_RING_SETTING_NAMES: Array[String] = [
+	"library_focus_scale",
+	"library_focus_movement_anim",
+	"library_focus_idle_anim",
+	"library_focus_ring_thickness",
+	"library_focus_ring_shape",
+	"library_focus_ring_outset",
+]
+
 var _library_general_menu: SettingsMenu = null
+var _focus_ring_menu: SettingsMenu = null
 
 var _margin: MarginContainer = null
 var _vbox: VBoxContainer = null
@@ -56,6 +66,10 @@ func _setup_ui() -> void:
 	# General layout settings (excluding internal ones)
 	_library_general_menu = SettingsMenu.new()
 	vbox.add_child(_library_general_menu)
+
+	# Focus-specific controls get a visual break from the general settings.
+	_focus_ring_menu = SettingsMenu.new()
+	vbox.add_child(_focus_ring_menu)
 
 	# Bottom buffer
 	var bottom_buffer = Control.new()
@@ -117,12 +131,26 @@ func _refresh_all_settings_ui() -> void:
 		var subgroups = DataManager.get_settings_by_subgroup()
 		if subgroups.has("Library Appearance"):
 			for sv in subgroups["Library Appearance"]:
-				if sv.state != SettingsVar.SettingState.INTERNAL:
+				if sv.state != SettingsVar.SettingState.INTERNAL and not FOCUS_RING_SETTING_NAMES.has(sv.property_name):
 					general_settings.append(sv)
 		if general_settings.size() > 0:
 			_library_general_menu.build_controls_from_settingsvars(general_settings, "General", "tune")
 			if not _library_general_menu.setting_changed.is_connected(_on_setting_changed):
 				_library_general_menu.setting_changed.connect(_on_setting_changed)
+
+	# Build the focus section explicitly so its order stays stable and future
+	# focus-adjacent settings (such as focus centering) don't move accidentally.
+	if _focus_ring_menu:
+		_focus_ring_menu.clear_controls()
+		var focus_settings: Array[SettingsVar] = []
+		for property_name in FOCUS_RING_SETTING_NAMES:
+			var setting = DataManager.get_setting(property_name)
+			if setting and setting.state != SettingsVar.SettingState.INTERNAL:
+				focus_settings.append(setting)
+		if focus_settings.size() > 0:
+			_focus_ring_menu.build_controls_from_settingsvars(focus_settings, "Focus Ring", "crosshairs")
+			if not _focus_ring_menu.setting_changed.is_connected(_on_setting_changed):
+				_focus_ring_menu.setting_changed.connect(_on_setting_changed)
 
 	# Refresh preset dropdown
 	_refresh_preset_dropdown()

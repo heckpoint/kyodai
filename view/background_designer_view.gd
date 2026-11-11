@@ -1,15 +1,14 @@
 class_name BackgroundDesignerView
 extends Control
 
-## Background Designer: stackable background effect layers + standard-effect
-## overlays over the M3 surface base color, with a live preview pane.
+## Background Designer: one ordered composition of strict background layers
+## and compatible shared effects over the M3 surface base color.
 
 var _config: Dictionary = {}
 var _config_loaded: bool = false
 var _suppress_config_signal: bool = false
 
 var _effects_designer: EffectDesignerUI
-var _overlay_designer: EffectDesignerUI
 var _preview_background: LibraryBackground
 
 func _ready():
@@ -33,8 +32,6 @@ func on_view_show():
 	EffectRegistry.rescan()
 	if _effects_designer:
 		_effects_designer.rediscover()
-	if _overlay_designer:
-		_overlay_designer.rediscover()
 	_load_current_config()
 
 func on_view_hide():
@@ -68,24 +65,17 @@ func _setup_ui():
 	left_vbox.add_theme_constant_override("separation", int(M3Units.dp(16)))
 	scroll.add_child(left_vbox)
 
-	# Stackable background effect layers
+	# One ordered composition of strict background layers and shared effects.
 	_effects_designer = EffectDesignerUI.new()
 	_effects_designer.use_internal_scroll = false
-	_effects_designer.effect_registry = LibraryBackground.EFFECT_REGISTRY
+	_effects_designer.effect_registry = LibraryBackground.get_designer_registry()
 	_effects_designer.display_names = LibraryBackground.EFFECT_DISPLAY_NAMES
 	_effects_designer.custom_kind = "background"
+	_effects_designer.allow_multiple = true
 	_effects_designer.allow_reorder = true
 	_effects_designer.setup("Background Layers", "", "effects", false)
 	_effects_designer.config_changed.connect(_on_effects_config_changed)
 	left_vbox.add_child(_effects_designer)
-
-	# Standard-effect overlays (drawn on top of everything)
-	_overlay_designer = EffectDesignerUI.new()
-	_overlay_designer.use_internal_scroll = false
-	_overlay_designer.effect_registry = LibraryBackground.OVERLAY_REGISTRY
-	_overlay_designer.setup("Overlay", "", "overlays", false)
-	_overlay_designer.config_changed.connect(_on_overlay_config_changed)
-	left_vbox.add_child(_overlay_designer)
 
 	# Live preview
 	var right_container = Control.new()
@@ -104,12 +94,10 @@ func _load_current_config():
 		if config_setting and config_setting.value is Dictionary:
 			_config = LibraryBackground.normalize_config(config_setting.value)
 	if _config.is_empty():
-		_config = {"effects": [], "overlays": []}
+		_config = {"effects": []}
 
 	if _effects_designer:
 		_effects_designer.set_config(_config)
-	if _overlay_designer:
-		_overlay_designer.set_config(_config)
 	_update_preview()
 
 	_config_loaded = true
@@ -118,12 +106,6 @@ func _on_effects_config_changed(config: Dictionary):
 	if not _config_loaded:
 		return
 	_config["effects"] = config.get("effects", []).duplicate(true)
-	_apply()
-
-func _on_overlay_config_changed(config: Dictionary):
-	if not _config_loaded:
-		return
-	_config["overlays"] = config.get("overlays", []).duplicate(true)
 	_apply()
 
 func _apply():
@@ -166,8 +148,6 @@ func reconnect_viewport() -> void:
 
 	if _effects_designer and _effects_designer.has_method("reconnect_viewport"):
 		_effects_designer.reconnect_viewport()
-	if _overlay_designer and _overlay_designer.has_method("reconnect_viewport"):
-		_overlay_designer.reconnect_viewport()
 
 func _on_focus_changed(control: Control) -> void:
 	if not control:
@@ -175,8 +155,4 @@ func _on_focus_changed(control: Control) -> void:
 	if _effects_designer and _effects_designer.is_ancestor_of(control):
 		if _effects_designer._scroll_container:
 			_effects_designer._scroll_container.ensure_control_visible(control)
-		return
-	if _overlay_designer and _overlay_designer.is_ancestor_of(control):
-		if _overlay_designer._scroll_container:
-			_overlay_designer._scroll_container.ensure_control_visible(control)
 		return

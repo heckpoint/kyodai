@@ -116,6 +116,30 @@ func rebuild_grid(_refresh_effects: bool = false) -> void:
 # SHARED GRID / CARD LOGIC
 # ============================================
 
+func _gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		_open_background_context_menu(event.global_position)
+		accept_event()
+
+func _open_background_context_menu(screen_point: Vector2) -> void:
+	if not UIManager:
+		return
+	# A zero-sized, non-interactive control anchors the context menu to the
+	# pointer rather than to the whole view. Its lifetime follows the modal.
+	var anchor := Control.new()
+	anchor.name = "BackgroundMenuAnchor"
+	anchor.top_level = true
+	anchor.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	anchor.focus_mode = Control.FOCUS_NONE
+	anchor.size = Vector2.ZERO
+	add_child(anchor)
+	anchor.global_position = screen_point
+	var modal_id: String = UIManager.show_background_context_menu(anchor)
+	UIManager.modal_dismissed.connect(func(dismissed_id: String):
+		if dismissed_id == modal_id and is_instance_valid(anchor):
+			anchor.queue_free()
+	, CONNECT_ONE_SHOT)
+
 func _update_grid_orientation() -> void:
 	var state = UIManager.card_settings_state if UIManager else null
 	if not state:

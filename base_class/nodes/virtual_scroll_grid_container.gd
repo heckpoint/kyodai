@@ -1032,6 +1032,16 @@ var _resize_pending: bool = false
 const RESIZE_IGNORE_DELTA: float = 2.0
 
 func _gui_input(event: InputEvent) -> void:
+	# Right-clicks that were not consumed by a card arrive here through the
+	# scroll container. Handle them at the grid boundary; View itself never
+	# sees these events because this Control stops propagation.
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
+		var view = UIManager.get_view_for_grid(self) if UIManager else null
+		if view:
+			view._open_background_context_menu(event.global_position)
+			accept_event()
+		return
+
 	# Wheel over the grid's outer margin (the inset area around the scroll
 	# container) should still scroll; forward to the scroll container's wheel
 	# handler. Events over the scroll container itself are accepted there and

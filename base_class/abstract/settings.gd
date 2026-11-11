@@ -141,6 +141,7 @@ static func _preset(s: SettingsVar) -> SettingsVar:
 
 @export_subgroup("Library Appearance")
 # General layout settings (always visible)
+@export var library_primary_color := _preset(SettingsVar.new(Type.COLOR, Color.WHITE, State.ENABLED, "Accent Color", "Primary color for the Material 3 interface theme"))
 @export var dark_mode := _preset(SettingsVar.new(Type.BOOL, true, State.ENABLED, "Dark Mode", "Use dark colors for the Material 3 interface"))
 @export var frosted_look := _preset(SettingsVar.new(Type.BOOL, false, State.ENABLED, "Frosted Look", "Blur the backdrop behind cards, dialogs and sheets, tinted with the current theme colors"))
 @export var library_layout_mode := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Layout Mode", "How game cards are arranged in the library", 0.0, 2.0, 1.0, ["Grid", "List", "Carousel"]))
@@ -159,6 +160,7 @@ static func _preset(s: SettingsVar) -> SettingsVar:
 @export var library_focus_idle_anim := _preset(SettingsVar.new(Type.ARRAY, 0, State.ENABLED, "Focus Idle Animation", "Looping animation shown on the focus ring while focus is stationary", 0.0, 2.0, 1.0, ["None", "Breathe", "Chase"]))
 @export var library_focus_ring_thickness := _preset(SettingsVar.new(Type.FLOAT, 3.0, State.ENABLED, "Focus Ring Thickness", "Stroke width of the focus ring in dp", 1.0, 8.0, 0.5))
 @export var library_focus_ring_shape := _preset(SettingsVar.new(Type.ARRAY, 0, State.ENABLED, "Focus Ring Shape", "Full draws the complete rounded ring; Corners draws only crosshair-style corner ticks", 0.0, 1.0, 1.0, ["Full", "Corners"]))
+@export var library_focus_ring_outset := _preset(SettingsVar.new(Type.INT, 2, State.ENABLED, "Focus Ring Outset", "Space between the focused control and the focus ring in dp", 0.0, 12.0, 1.0, [], false, {"show_stops": false, "display_unit": "dp"}))
 @export var library_card_content_alignment := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Content Alignment", "How card content is positioned within the card cell", 0.0, 2.0, 1.0, ["Left/Top", "Center/Middle", "Right/Bottom"]))
 @export var library_card_show_platform := _preset(SettingsVar.new(Type.BOOL, true, State.INTERNAL, "Show Platform", "Display the platform as supporting text on game cards"))
 # Follow Content preserves the alignment supplied by Content Alignment until
@@ -168,7 +170,6 @@ static func _preset(s: SettingsVar) -> SettingsVar:
 @export var library_card_text_focused_only := _preset(SettingsVar.new(Type.BOOL, false, State.INTERNAL, "Focused Only", "Hide title and platform text on every unfocused game card"))
 @export var card_media_aspect_ratio := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Card Media Ratio", "Aspect ratio of the card's media panel", 0.0, 4.0, 1.0, ["Fill", "2:3", "3:4", "1:1", "16:11"]))
 @export var library_card_display_mode := _preset(SettingsVar.new(Type.ARRAY, 0, State.INTERNAL, "Card Display Mode", "How game cards appear in the library", 0.0, 2.0, 1.0, ["Standard", "Transparent", "Media Only"]))
-@export var library_primary_color := _preset(SettingsVar.new(Type.COLOR, Color.WHITE, State.ENABLED, "Accent Color", "Primary color for the Material 3 interface theme"))
 
 
 # Internal first-run flag (tracks if OOBE wizard has been completed)
@@ -182,8 +183,7 @@ static func _preset(s: SettingsVar) -> SettingsVar:
 
 # Internal background effect configuration (managed by the Background Designer)
 @export var library_background_config := _preset(SettingsVar.new(Type.DICTIONARY, {
-	"effects": [],
-	"overlays": []
+	"effects": []
 }, State.INTERNAL, "Background Effect Configuration"))
 
 # Internal pinned navigation shortcuts (managed by NavigationSubManager)

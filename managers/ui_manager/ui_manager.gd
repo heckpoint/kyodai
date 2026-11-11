@@ -1,6 +1,7 @@
 extends Manager
 
 const DEBUG_LOG: bool = false
+const CONTENT_MARGIN_DP: float = 16.0
 
 const FSM := preload("res://managers/system_manager/filesystem_sub_manager.gd")
 const TITLE_BAR_SCRIPT := preload("res://components/title_bar.gd")
@@ -263,6 +264,7 @@ func initialize(
 	DataManager.settings_saved.connect(_on_settings_saved)
 	DataManager.apply_preset_begin.connect(_on_apply_preset_begin)
 	DataManager.apply_preset_end.connect(_on_apply_preset_end)
+	modal_item_selected.connect(_on_modal_item_selected)
 
 	# Apply dark mode setting on startup (walks the tree only on actual change)
 	var dark_mode_setting = DataManager.get_setting("dark_mode")
@@ -309,6 +311,9 @@ func initialize(
 	var focus_shape_setting = DataManager.get_setting("library_focus_ring_shape")
 	if focus_shape_setting and focus_shape_setting.value is int:
 		_apply_focus_ring_shape(focus_shape_setting.value)
+	var focus_outset_setting = DataManager.get_setting("library_focus_ring_outset")
+	if focus_outset_setting and (focus_outset_setting.value is float or focus_outset_setting.value is int):
+		focus.offset_dp = float(focus_outset_setting.value)
 
 	# Only walk the tree when a style-affecting setting actually changed the
 	# M3Theme state from the compiled defaults (see style_dirty above); nodes
@@ -321,7 +326,7 @@ func initialize(
 # ============================================================================
 
 func _apply_content_margin(margin_container: MarginContainer) -> void:
-	var margin := int(M3Units.dp(16))
+	var margin := int(M3Units.dp(CONTENT_MARGIN_DP))
 	margin_container.add_theme_constant_override("margin_left", margin)
 	margin_container.add_theme_constant_override("margin_right", margin)
 	margin_container.add_theme_constant_override("margin_top", margin)
@@ -400,7 +405,7 @@ func compute_grid_available_size(grid: VirtualScrollGridContainer, target_view: 
 		viewport_size = active_viewport.size
 
 	# Subtract the outer margins that wrap MainContentVBox.
-	var margin: int = int(M3Units.dp(16))
+	var margin: int = int(M3Units.dp(CONTENT_MARGIN_DP))
 	var available_width := maxf(1.0, viewport_size.x - margin * 2)
 	var available_height := maxf(1.0, viewport_size.y - margin * 2)
 
@@ -542,6 +547,10 @@ func get_view_for_grid(grid: VirtualScrollGridContainer) -> View:
 func rebuild_game_grid() -> void:
 	view.rebuild_game_grid()
 
+func _on_modal_item_selected(item_id: String, _context: Dictionary) -> void:
+	if item_id == "background_designer":
+		show_settings_dialog_with_category("background_designer")
+
 func show_settings_dialog() -> void:
 	overlay.show_settings_dialog()
 
@@ -580,6 +589,9 @@ func set_card_designer_preview_game(romm_id: int) -> void:
 
 func get_settings_dialog_platforms_view() -> PlatformsSettingsView:
 	return overlay.get_settings_dialog_platforms_view()
+
+func show_background_context_menu(anchor: Control) -> String:
+	return overlay.show_background_context_menu(anchor)
 
 func show_game_context_menu(romm_id: int, anchor: Control, show_delete: bool = true, show_hide: bool = false) -> String:
 	return overlay.show_game_context_menu(romm_id, anchor, show_delete, show_hide)
@@ -984,6 +996,9 @@ func _on_setting_changed(_value: Variant, setting: SettingsVar) -> void:
 		"library_focus_ring_shape":
 			if focus and _value is int:
 				_apply_focus_ring_shape(_value)
+		"library_focus_ring_outset":
+			if focus and (_value is float or _value is int):
+				focus.offset_dp = float(_value)
 		# Card/grid specific settings (layout_mode, grid_vertical, card_zoom,
 		# grid_padding, focus_scale, display_mode, content_alignment, media_ratio,
 		# show_title_mode, card_effect_config, focus_lock) are owned by

@@ -1,9 +1,9 @@
 class_name LibraryBackground
 extends Control
 
-## Layered library background: the M3 surface color at the bottom, any
-## number of stackable BackgroundEffect layers (child order = draw order),
-## and standard card effects (e.g. gradient_overlay) composited on top.
+## Ordered background composition: the M3 surface color at the bottom, then a
+## single stack of strict BackgroundEffect layers and compatible shared effects.
+## Config order is draw order, including interleaved effect types.
 
 const EFFECT_REGISTRY: Dictionary = {
 	"gradient": "res://effects/background/gradient_background_effect.gd",
@@ -33,18 +33,20 @@ const EFFECT_DISPLAY_NAMES: Dictionary = {
 	"hero_art": "Hero Artwork",
 }
 
+## Shared effects currently known to work in the background's full-surface
+## media context. Card-only effects are not exposed here.
 const OVERLAY_REGISTRY: Dictionary = {
 	"gradient_overlay": "res://effects/shared/gradient_overlay_effect.gd",
 }
 
-var _config: Dictionary = {}
+const LAYER_BACKGROUND := "background"
+const LAYER_SHARED := "shared"
 
+var _config: Dictionary = {}
 var _base_rect: ColorRect = null
 
-# Effect layers: [{entry, node, viewport}] in draw order (bottom first)
+# One ordered stack: [{entry, kind, node, viewport, effect, media, draw_index}].
 var _layers: Array = []
-# Standard-effect overlays: [{entry, effect, media}]
-var _overlays: Array = []
 
 func _ready():
 	_initialize_background()
@@ -66,15 +68,16 @@ func _update_layer_viewport_activity() -> void:
 
 func _on_resized() -> void:
 	for layer in _layers:
-		if layer.viewport:
-			layer.viewport.size = _get_scaled_effect_size(layer.node)
-			layer.node.size = Vector2(layer.viewport.size)
+		if layer.kind == LAYER_BACKGROUND:
+			if layer.viewport:
+				layer.viewport.size = _get_scaled_effect_size(layer.node)
+				layer.node.size = Vector2(layer.viewport.size)
+			else:
+				layer.node.size = size
 		else:
-			layer.node.size = size
-	for overlay in _overlays:
-		overlay.media.bounds = Rect2(Vector2.ZERO, size)
-		overlay.effect.set_offset_rect(Rect2(Vector2.ZERO, size))
-		overlay.effect.update_settings(overlay.entry.get("settings", {}))
+			layer.media.bounds = Rect2(Vector2.ZERO, size)
+			layer.effect.set_offset_rect(Rect2(Vector2.ZERO, size))
+			layer.effect.update_settings(layer.entry.get("settings", {}))
 
 func _get_scaled_effect_size(effect: BackgroundEffect) -> Vector2i:
 	var scale_factor = effect.render_scale if effect else 1.0
@@ -90,16 +93,17 @@ func _initialize_background() -> void:
 	_apply_background_state(true)
 
 static func _empty_config() -> Dictionary:
-	return {"effects": [], "overlays": []}
+	return {"effects": []}
 
 static func normalize_config(config: Dictionary) -> Dictionary:
-	## Sanitizes a layered background config; unknown keys (e.g. the retired
-	## "base" gradient block) are dropped.
+	## Single ordered stack. Legacy overlays are appended after legacy background
+	## layers, matching the old renderer's guaranteed draw order. The legacy key
+	## is omitted from the result so normalization cannot migrate it twice.
 	var out := _empty_config()
 	if config.get("effects") is Array:
 		out["effects"] = config["effects"].duplicate(true)
 	if config.get("overlays") is Array:
-		out["overlays"] = config["overlays"].duplicate(true)
+		out["effects"].append_array(config["overlays"].duplicate(true))
 	return out
 
 func _apply_background_state(full_rebuild: bool) -> void:
@@ -107,41 +111,37 @@ func _apply_background_state(full_rebuild: bool) -> void:
 		_clear_layers()
 		_build_base()
 		_build_layers()
-		_build_overlays()
 	else:
 		# Re-zip entries from the fresh config: normalize_config deep-duplicates
-		# on every call, so stored entries would otherwise go stale. The
-		# signature check guarantees identical ids and order, so index-matching
-		# is safe.
+		# on every call, so stored entries would otherwise go stale. Identical
+		# signatures guarantee the same IDs and order, so index matching is safe.
 		var effects: Array = _config.get("effects", [])
 		for i in range(_layers.size()):
 			if i < effects.size():
 				_layers[i].entry = effects[i]
-			_layers[i].node.update_settings(_layers[i].entry.get("settings", {}))
-		var overlays: Array = _config.get("overlays", [])
-		for i in range(_overlays.size()):
-			if i < overlays.size():
-				_overlays[i].entry = overlays[i]
-			_overlays[i].effect.update_settings(_overlays[i].entry.get("settings", {}))
+			if _layers[i].kind == LAYER_BACKGROUND:
+				_layers[i].node.update_settings(_layers[i].entry.get("settings", {}))
+			else:
+				_layers[i].effect.update_settings(_layers[i].entry.get("settings", {}))
 
 func _clear_layers() -> void:
 	for layer in _layers:
-		layer.node.queue_free()
-		if layer.viewport:
+		if is_instance_valid(layer.node):
+			layer.node.queue_free()
+		if is_instance_valid(layer.viewport):
 			layer.viewport.queue_free()
+		if is_instance_valid(layer.effect):
+			layer.effect.free_rid()
 	_layers.clear()
-	for overlay in _overlays:
-		overlay.effect.free_rid()
-	_overlays.clear()
 	if _base_rect:
 		_base_rect.queue_free()
 		_base_rect = null
-
 
 func _build_base() -> void:
 	_base_rect = ColorRect.new()
 	_base_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
 	_base_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_base_rect.z_index = 0
 	add_child(_base_rect)
 	move_child(_base_rect, 0)
 	refresh_theme()
@@ -153,60 +153,75 @@ func refresh_theme() -> void:
 		_base_rect.color = M3Theme.get_surface_container_low()
 
 func _build_layers() -> void:
-	for entry in _config.get("effects", []):
+	var effects: Array = _config.get("effects", [])
+	for i in range(effects.size()):
+		var entry = effects[i]
 		if not entry is Dictionary:
 			continue
-		var effect := EffectRegistry.create_background_effect(entry.get("effect_id", ""))
-		if not effect:
-			continue
-		if effect.render_scale < 1.0:
-			# GPU-heavy effect: render into a scaled-down SubViewport (transparent
-			# so layers beneath show through) and stretch it back to full size.
-			var viewport := SubViewport.new()
-			viewport.size = _get_scaled_effect_size(effect)
-			viewport.transparent_bg = true
-			viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
-			viewport.add_child(effect)
-			effect.position = Vector2.ZERO
-			effect.size = Vector2(viewport.size)
-			effect.visible = true
-			effect.initialize(entry.get("settings", {}))
-			var container := SubViewportContainer.new()
-			container.stretch = true
-			container.set_anchors_preset(Control.PRESET_FULL_RECT)
-			container.mouse_filter = Control.MOUSE_FILTER_IGNORE
-			add_child(container)
-			container.add_child(viewport)
-			_layers.append({"entry": entry, "node": effect, "viewport": viewport})
+		var draw_index := i + 1  # The base surface stays at index zero.
+		var background_effect := EffectRegistry.create_background_effect(entry.get("effect_id", ""))
+		if background_effect:
+			_build_background_layer(entry, background_effect, draw_index)
 		else:
-			add_child(effect)
-			effect.position = Vector2.ZERO
-			effect.size = size
-			effect.visible = true
-			effect.initialize(entry.get("settings", {}))
-			_layers.append({"entry": entry, "node": effect, "viewport": null})
+			_build_shared_layer(entry, draw_index)
 
-func _build_overlays() -> void:
-	for entry in _config.get("overlays", []):
-		if not entry is Dictionary:
-			continue
-		var script_path: String = OVERLAY_REGISTRY.get(entry.get("effect_id", ""), "")
-		if script_path.is_empty():
-			continue
-		var script = load(script_path)
-		if not script:
-			continue
-		var effect: EffectBase = script.new()
-		if not effect:
-			continue
-		var media := MediaContainer.new()
-		media.bounds = Rect2(Vector2.ZERO, size)
-		media.corner_radius_ratio = 0.0
-		effect.initialize(media, entry.get("settings", {}))
-		effect.ensure_canvas_item(get_canvas_item())
-		effect.set_z_index(1)  # above sibling layer canvas items
-		effect.set_offset_rect(Rect2(Vector2.ZERO, size))
-		_overlays.append({"entry": entry, "effect": effect, "media": media})
+func _build_background_layer(entry: Dictionary, effect: BackgroundEffect, draw_index: int) -> void:
+	if effect.render_scale < 1.0:
+		# GPU-heavy effect: render into a scaled-down SubViewport (transparent
+		# so layers beneath show through) and stretch it back to full size.
+		var viewport := SubViewport.new()
+		viewport.size = _get_scaled_effect_size(effect)
+		viewport.transparent_bg = true
+		viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+		viewport.add_child(effect)
+		effect.position = Vector2.ZERO
+		effect.size = Vector2(viewport.size)
+		effect.visible = true
+		effect.initialize(entry.get("settings", {}))
+		var container := SubViewportContainer.new()
+		container.stretch = true
+		container.set_anchors_preset(Control.PRESET_FULL_RECT)
+		container.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		container.z_index = draw_index
+		add_child(container)
+		container.add_child(viewport)
+		_layers.append({
+			"entry": entry, "kind": LAYER_BACKGROUND, "node": effect,
+			"viewport": viewport, "effect": null, "media": null, "draw_index": draw_index,
+		})
+	else:
+		effect.z_index = draw_index
+		add_child(effect)
+		effect.position = Vector2.ZERO
+		effect.size = size
+		effect.visible = true
+		effect.initialize(entry.get("settings", {}))
+		_layers.append({
+			"entry": entry, "kind": LAYER_BACKGROUND, "node": effect,
+			"viewport": null, "effect": null, "media": null, "draw_index": draw_index,
+		})
+
+func _build_shared_layer(entry: Dictionary, draw_index: int) -> void:
+	var script_path: String = OVERLAY_REGISTRY.get(entry.get("effect_id", ""), "")
+	if script_path.is_empty():
+		return
+	var script = load(script_path)
+	if not script:
+		return
+	var effect: EffectBase = script.new()
+	if not effect:
+		return
+	var media := MediaContainer.new()
+	media.bounds = Rect2(Vector2.ZERO, size)
+	media.corner_radius_ratio = 0.0
+	effect.initialize(media, entry.get("settings", {}))
+	effect.ensure_canvas_item(get_canvas_item())
+	effect.set_z_index(draw_index)
+	effect.set_offset_rect(Rect2(Vector2.ZERO, size))
+	_layers.append({
+		"entry": entry, "kind": LAYER_SHARED, "node": null,
+		"viewport": null, "effect": effect, "media": media, "draw_index": draw_index,
+	})
 
 # Public API for updating background configuration
 func set_background_config(config: Dictionary) -> void:
@@ -219,22 +234,23 @@ func get_background_config() -> Dictionary:
 	return _config.duplicate(true)
 
 func _config_signature(config: Dictionary) -> String:
-	# Layers/overlays are only rebuilt when the set and order of ids changes;
-	# settings-only changes take the cheaper update path.
+	# Rebuild only when the ordered set of IDs changes; settings-only changes
+	# take the cheaper update path, including reordered duplicates.
 	var parts: Array[String] = []
 	for entry in config.get("effects", []):
 		if entry is Dictionary:
 			parts.append(entry.get("effect_id", ""))
-	parts.append("|")
-	for entry in config.get("overlays", []):
-		if entry is Dictionary:
-			parts.append(entry.get("effect_id", ""))
 	return ",".join(parts)
+
+static func get_designer_registry() -> Dictionary:
+	var registry := EFFECT_REGISTRY.duplicate()
+	registry.merge(OVERLAY_REGISTRY, true)
+	return registry
 
 # Get available effect IDs for dropdowns/designers
 static func get_available_effects() -> Array[String]:
 	var ids: Array[String] = []
-	ids.assign(EFFECT_REGISTRY.keys())
+	ids.assign(get_designer_registry().keys())
 	for descriptor in EffectRegistry.get_custom_descriptors("background"):
 		var custom_id: String = descriptor.get("id", "")
 		if custom_id != "" and not ids.has(custom_id):
@@ -250,7 +266,7 @@ static func get_effect_display_name(effect_id: String) -> String:
 static func get_effect_schema(effect_id: String) -> Array[SettingsVar]:
 	if EffectRegistry.is_custom(effect_id):
 		return EffectRegistry.get_schema(effect_id)
-	var script_path: String = EFFECT_REGISTRY.get(effect_id, "")
+	var script_path: String = EFFECT_REGISTRY.get(effect_id, OVERLAY_REGISTRY.get(effect_id, ""))
 	if script_path.is_empty():
 		return []
 	var script = load(script_path)
@@ -258,5 +274,8 @@ static func get_effect_schema(effect_id: String) -> Array[SettingsVar]:
 		return []
 	var effect = script.new()
 	var schema: Array[SettingsVar] = effect.get_settings_schema()
-	effect.free()
+	if effect is Node:
+		effect.free()
+	else:
+		effect.free_rid()
 	return schema

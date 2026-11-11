@@ -14,6 +14,7 @@ var _more_button: M3IconButton = null
 var _mask: Panel = null
 var _toolbar: PanelContainer = null
 var _user_avatar: UserAvatar = null
+var _avatar_margin: Control = null
 var _platform_indicator: PlatformIndicator = null
 var _controlbar_left: HBoxContainer = null
 var _controlbar_right: HBoxContainer = null
@@ -62,6 +63,17 @@ func initialize(
 	_controlbar_left = _main_content_vbox.get_node_or_null("controlbar_background/controlbar_hbox/ControlBarLeft")
 	_controlbar_right = _main_content_vbox.get_node_or_null("controlbar_background/controlbar_hbox/ControlBarRight")
 
+	# Match the avatar's trailing gap to the outer content margin without
+	# increasing the separations between the zoom controls themselves.
+	if _controlbar_left and _user_avatar and not is_instance_valid(_avatar_margin):
+		_avatar_margin = Control.new()
+		_avatar_margin.name = "AvatarOuterMargin"
+		_avatar_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_avatar_margin.focus_mode = Control.FOCUS_NONE
+		_controlbar_left.add_child(_avatar_margin)
+		_controlbar_left.move_child(_avatar_margin, _user_avatar.get_index() + 1)
+	_apply_avatar_margin()
+
 	# Create debounced zoom save timer (replaces _process polling)
 	_zoom_save_timer = Timer.new()
 	_zoom_save_timer.one_shot = true
@@ -88,6 +100,19 @@ func initialize(
 		if not _toolbar.resized.is_connected(_update_indicator_inset):
 			_toolbar.resized.connect(_update_indicator_inset)
 		_update_indicator_inset.call_deferred()
+
+func _apply_avatar_margin() -> void:
+	if not _controlbar_left or not is_instance_valid(_avatar_margin):
+		return
+	# The spacer has an HBox separation on each side; all three contributions
+	# together make the avatar-to-controller gap equal to the outer margin.
+	var hbox_separation := _controlbar_left.get_theme_constant("separation")
+	var spacer_width := maxf(0.0, M3Units.dp(UIManager.CONTENT_MARGIN_DP) - 2.0 * hbox_separation)
+	_avatar_margin.custom_minimum_size = Vector2(spacer_width, 0.0)
+
+func refresh_scale() -> void:
+	_apply_avatar_margin()
+	_update_indicator_inset()
 
 func connect_signals() -> void:
 	# Connect zoom slider signals. value_changed is deferred until after startup

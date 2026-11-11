@@ -548,6 +548,13 @@ func show_context_menu(items: Array[Dictionary], anchor: Control, context: Dicti
 	ui_manager.modal_shown.emit(modal_id)
 	return modal_id
 
+func show_background_context_menu(anchor: Control) -> String:
+	"""Show the context menu for empty library/background space."""
+	var items: Array[Dictionary] = [
+		{"id": "background_designer", "text": "Open Background Designer", "icon": "image-outline"}
+	]
+	return show_context_menu(items, anchor, {"source": "background"})
+
 func show_game_context_menu(romm_id: int, anchor: Control, show_delete: bool = true, show_hide: bool = false) -> String:
 	"""Show the standard game context menu."""
 	var items: Array[Dictionary] = [
