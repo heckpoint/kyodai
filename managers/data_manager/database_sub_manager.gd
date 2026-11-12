@@ -13,6 +13,8 @@ const _EXPECTED_SCHEMA := {
 	"games": {
 		"id": "TEXT PRIMARY KEY", "romm_id": "INTEGER UNIQUE NOT NULL", "title": "TEXT NOT NULL",
 		"platform": "TEXT", "platform_slug": "TEXT", "cover_url": "TEXT", "cover_path": "TEXT",
+		"cover_primary_color": "TEXT DEFAULT ''", "cover_secondary_color": "TEXT DEFAULT ''",
+		"cover_tertiary_color": "TEXT DEFAULT ''", "cover_colors_version": "INTEGER DEFAULT 0",
 		"file_name": "TEXT", "file_path": "TEXT", "file_size": "INTEGER DEFAULT 0",
 		"has_local_copy": "INTEGER DEFAULT 0", "last_updated": "TEXT", "description": "TEXT",
 		"genres": "TEXT", "rating": "REAL DEFAULT 0.0", "release_date": "INTEGER DEFAULT 0",
@@ -223,6 +225,10 @@ func _create_tables():
 			platform_slug TEXT,
 			cover_url TEXT,
 			cover_path TEXT,
+			cover_primary_color TEXT DEFAULT '',
+			cover_secondary_color TEXT DEFAULT '',
+			cover_tertiary_color TEXT DEFAULT '',
+			cover_colors_version INTEGER DEFAULT 0,
 			file_name TEXT,
 			file_path TEXT,
 			file_size INTEGER DEFAULT 0,
@@ -749,6 +755,13 @@ func count_folded_sibling_entries() -> int:
 	return 0
 
 
+func _color_from_storage(value: Variant) -> Color:
+	var encoded := str(value).strip_edges()
+	if encoded.is_empty() or not Color.html_is_valid(encoded):
+		return Color.TRANSPARENT
+	return Color.html(encoded)
+
+
 func _row_to_game(row: Dictionary) -> GameResource:
 	var game = GameResource.new()
 	game.id = row.get("id", "")
@@ -758,6 +771,10 @@ func _row_to_game(row: Dictionary) -> GameResource:
 	game.platform_slug = row.get("platform_slug", "")
 	game.cover_url = row.get("cover_url", "")
 	game.cover_path = row.get("cover_path", "")
+	game.cover_primary_color = _color_from_storage(row.get("cover_primary_color", ""))
+	game.cover_secondary_color = _color_from_storage(row.get("cover_secondary_color", ""))
+	game.cover_tertiary_color = _color_from_storage(row.get("cover_tertiary_color", ""))
+	game.cover_colors_version = int(row.get("cover_colors_version", 0))
 	game.file_name = row.get("file_name", "")
 	game.file_path = row.get("file_path", "")
 	game.file_size = row.get("file_size", 0)
@@ -1334,6 +1351,10 @@ func update_game(game: GameResource, callback: Callable = Callable()) -> bool:
 					platform_slug = ?,
 					cover_url = ?,
 					cover_path = ?,
+					cover_primary_color = CASE WHEN cover_url = ? THEN cover_primary_color ELSE '' END,
+					cover_secondary_color = CASE WHEN cover_url = ? THEN cover_secondary_color ELSE '' END,
+					cover_tertiary_color = CASE WHEN cover_url = ? THEN cover_tertiary_color ELSE '' END,
+					cover_colors_version = CASE WHEN cover_url = ? THEN cover_colors_version ELSE 0 END,
 					file_name = ?,
 					file_path = ?,
 					file_size = ?,
@@ -1366,6 +1387,10 @@ WHERE romm_id = ?
 				game.platform_slug,
 				game.cover_url,
 				game.cover_path,
+				game.cover_url,
+				game.cover_url,
+				game.cover_url,
+				game.cover_url,
 				game.file_name,
 				game.file_path,
 				game.file_size,
@@ -1408,6 +1433,44 @@ WHERE romm_id = ?
 				callback.call(success)
 	)
 	return true
+
+
+## Persist extracted palettes for every game sharing each cover URL. Duplicate
+## covers are therefore decoded once while all associated rows stay consistent.
+func update_cover_palettes(palettes: Array, callback: Callable = Callable()) -> void:
+	if not _is_db_ready or palettes.is_empty():
+		if callback.is_valid():
+			callback.call(false)
+		return
+
+	MemorySubManager.queue_db_task(
+		func():
+			lock()
+			var success := query_bool_unlocked("BEGIN TRANSACTION")
+			for palette in palettes:
+				if not success:
+					break
+				success = query_bool_unlocked(
+					"""UPDATE games SET cover_primary_color = ?, cover_secondary_color = ?,
+					cover_tertiary_color = ?, cover_colors_version = ? WHERE cover_url = ?""",
+					[
+						str(palette.get("primary", "")),
+						str(palette.get("secondary", "")),
+						str(palette.get("tertiary", "")),
+						int(palette.get("version", 0)),
+						str(palette.get("url", "")),
+					]
+				)
+			if success:
+				success = query_bool_unlocked("COMMIT")
+			else:
+				query_bool_unlocked("ROLLBACK")
+			unlock()
+			return success,
+		func(success):
+			if callback.is_valid():
+				callback.call(success == true)
+	)
 
 
 func update_game_title_id(romm_id: int, title_id: String, callback: Callable = Callable()) -> bool:
@@ -1775,7 +1838,7 @@ func get_games_by_platform(platform_slug: String, filters: Dictionary = {}) -> A
 ## Columns for shuffle fetches: everything except the large description/
 ## screenshots blobs, whose per-row JSON parsing dominates bag-prep cost.
 ## _row_to_game tolerates the missing columns.
-const _SHUFFLE_COLUMNS := "id, romm_id, title, platform, platform_slug, cover_url, cover_path, file_name, file_path, file_size, has_local_copy, last_updated, genres, rating, release_date, siblings, selected_sibling_id, is_master_entry, downloaded_sibling_ids, has_cover_art, last_played, status, now_playing, backlogged, hidden, is_favorite, title_id, save_id, save_usage, cover_group_id, cover_group_master, igdb_metadata, igdb_id, m3u_path, unwrapped"
+const _SHUFFLE_COLUMNS := "id, romm_id, title, platform, platform_slug, cover_url, cover_path, cover_primary_color, cover_secondary_color, cover_tertiary_color, cover_colors_version, file_name, file_path, file_size, has_local_copy, last_updated, genres, rating, release_date, siblings, selected_sibling_id, is_master_entry, downloaded_sibling_ids, has_cover_art, last_played, status, now_playing, backlogged, hidden, is_favorite, title_id, save_id, save_usage, cover_group_id, cover_group_master, igdb_metadata, igdb_id, m3u_path, unwrapped"
 
 ## Shuffle-optimized platform fetch: same WHERE semantics as
 ## get_games_by_platform, but skips description/screenshots and drops

@@ -15,6 +15,8 @@ signal sync_completed(success: bool, message: String)
 signal sync_progress(percent: float, current: int, total: int)
 @warning_ignore("unused_signal")
 signal game_updated(game: GameResource)
+@warning_ignore("unused_signal")
+signal cover_palette_updated(cover_url: String)
 ## Emitted when a game's Home-grid membership changes (local hide/unhide).
 ## Home rebuilds on this; other views ignore it (nothing displays the flag).
 @warning_ignore("unused_signal")

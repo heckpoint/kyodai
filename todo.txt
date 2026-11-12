@@ -41,9 +41,6 @@ rework hero to also accept effect stacks
 	card/image/poster style
 	hero IGDB opt
 	hero fx (screenshots/cropping/shadows/etc)
-	
-## performance & sync:
-	cache image colors on sync
 
 ## features:
 	auto m3us

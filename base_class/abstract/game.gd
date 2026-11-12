@@ -10,6 +10,12 @@ const FSM := preload("res://managers/system_manager/filesystem_sub_manager.gd")
 @export var platform_slug: String
 @export var cover_url: String
 @export var cover_path: String
+## Derived from the cached cover during library sync. Kept independently of
+## the image cache so palette metadata survives cover eviction.
+@export var cover_primary_color: Color = Color.TRANSPARENT
+@export var cover_secondary_color: Color = Color.TRANSPARENT
+@export var cover_tertiary_color: Color = Color.TRANSPARENT
+@export var cover_colors_version: int = 0
 ## RomM screenshot media URLs (from merged_screenshots), streamed on demand
 ## by the details sheet; never prefetched or disk-cached beyond the shared
 ## image cache.

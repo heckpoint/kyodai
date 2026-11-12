@@ -3,6 +3,7 @@ class_name CoverSubManager
 
 const FSM := preload("res://managers/system_manager/filesystem_sub_manager.gd")
 const CoverTrace = preload("res://utils/cover_trace.gd")
+const CoverPalette = preload("res://utils/cover_palette.gd")
 
 var data_manager: Node
 
@@ -47,6 +48,19 @@ var _cache_file_sizes: Dictionary = {}  # filename -> size in bytes
 var _lru_map: Dictionary = {}
 var _lru_dirty: bool = false
 var _lru_flush_timer: Timer = null
+
+# Palette extraction is background, low-priority work. Only two batches occupy
+# the six image workers so cover decoding and visible cards keep most of the
+# pool. These queues are main-thread only; workers receive immutable snapshots.
+const PALETTE_BATCH_SIZE: int = 8
+const PALETTE_MAX_IN_FLIGHT_BATCHES: int = 2
+var _palette_pending: Array[String] = []
+var _palette_pending_set: Dictionary = {}
+var _palette_candidate_set: Dictionary = {}
+var _palette_generation: Dictionary = {}
+var _palette_inflight_set: Dictionary = {}
+var _palette_inflight_batches: int = 0
+var _palette_succeeded_set: Dictionary = {}
 
 
 func _ready():
@@ -367,6 +381,118 @@ func get_cached_image_path(url: String) -> String:
 				extension = "jpg"
 
 	return CACHE_FOLDER + url.md5_text() + "." + extension
+
+
+## Queue a cover for palette extraction. Main thread only. Missing cache files
+## are ignored here; the cover download callback queues them once available.
+func queue_palette_extraction(url: String, cache_verified: bool = false) -> void:
+	if url.is_empty() or not url.begins_with("http"):
+		return
+	if _palette_succeeded_set.has(url) or _palette_pending_set.has(url) or _palette_inflight_set.has(url):
+		return
+	_palette_candidate_set[url] = true
+	if not cache_verified and not FSM.file_exists(get_cached_image_path(url)):
+		return
+	_palette_pending.append(url)
+	_palette_pending_set[url] = true
+	_dispatch_palette_batches()
+
+
+func register_palette_candidates(urls: Array, invalidate_inflight: bool = false) -> void:
+	for value in urls:
+		var url := str(value)
+		if not url.is_empty() and url.begins_with("http"):
+			# The DB said this palette is missing/outdated, so a previous success
+			# may have been overwritten. Only actual sync-row replacements bump
+			# the generation; read-only backfill scans avoid duplicate decoding.
+			if invalidate_inflight:
+				_palette_generation[url] = int(_palette_generation.get(url, 0)) + 1
+			_palette_succeeded_set.erase(url)
+			_palette_candidate_set[url] = true
+
+
+func queue_palette_extractions(urls: Array, cache_verified: bool = false) -> void:
+	for url in urls:
+		queue_palette_extraction(str(url), cache_verified)
+
+
+## Download completion hook. Up-to-date covers are not candidates, so routine
+## downloads do not cause unnecessary palette recomputation.
+func queue_downloaded_cover_palette(url: String) -> void:
+	if _palette_candidate_set.has(url):
+		queue_palette_extraction(url)
+
+
+func _dispatch_palette_batches() -> void:
+	while _palette_inflight_batches < PALETTE_MAX_IN_FLIGHT_BATCHES and not _palette_pending.is_empty():
+		var take := mini(PALETTE_BATCH_SIZE, _palette_pending.size())
+		var batch: Array[String] = []
+		var generations := {}
+		for i in range(take):
+			var url := _palette_pending[i]
+			batch.append(url)
+			generations[url] = int(_palette_generation.get(url, 0))
+			_palette_pending_set.erase(url)
+			_palette_inflight_set[url] = true
+		_palette_pending = _palette_pending.slice(take)
+		_palette_inflight_batches += 1
+		MemorySubManager.queue_image_task(
+			_extract_palette_batch.bind(batch),
+			_on_palette_batch_extracted.bind(batch, generations),
+			false
+		)
+
+
+## Image worker: decode and sample a small batch sequentially. Raw FileAccess is
+## intentional: FSM reaches autoloads and is not safe to use from every worker.
+func _extract_palette_batch(urls: Array[String]) -> Array:
+	var palettes: Array = []
+	for url in urls:
+		var cache_path := get_cached_image_path(url)
+		var file := FileAccess.open(cache_path, FileAccess.READ)
+		if file == null:
+			continue
+		var buffer := file.get_buffer(file.get_length())
+		file.close()
+		var image := _load_image_from_memory(buffer, cache_path)
+		if image == null:
+			continue
+		var palette := CoverPalette.extract_hex(image)
+		if palette.is_empty():
+			continue
+		palette["url"] = url
+		palettes.append(palette)
+	return palettes
+
+
+func _on_palette_batch_extracted(result: Variant, urls: Array[String], generations: Dictionary) -> void:
+	if result == null or not result is Array or result.is_empty():
+		_finish_palette_batch(urls, [], false, generations)
+		return
+	data_manager.database.update_cover_palettes(result, func(success: bool):
+		_finish_palette_batch(urls, result, success, generations)
+	)
+
+
+func _finish_palette_batch(urls: Array[String], palettes: Array, persist_success: bool, generations: Dictionary) -> void:
+	_palette_inflight_batches = maxi(0, _palette_inflight_batches - 1)
+	for url in urls:
+		_palette_inflight_set.erase(url)
+	var retry: Array[String] = []
+	if persist_success:
+		for palette in palettes:
+			var url := str(palette.get("url", ""))
+			data_manager.cover_palette_updated.emit(url)
+			if int(_palette_generation.get(url, 0)) == int(generations.get(url, -1)):
+				_palette_candidate_set.erase(url)
+				_palette_succeeded_set[url] = true
+			else:
+				retry.append(url)
+	# A sync-row replacement invalidated this batch while it was in flight.
+	# Retry only those extracted URLs; failed decodes still wait for next sync.
+	for url in retry:
+		queue_palette_extraction(url)
+	_dispatch_palette_batches()
 
 
 func download_cover(url: String, callback: Callable, high_priority: bool = false, bulk: bool = false) -> void:

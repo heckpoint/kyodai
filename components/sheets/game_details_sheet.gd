@@ -2,6 +2,7 @@ class_name GameDetailsSheet
 extends M3BottomSheet
 
 const FSM := preload("res://managers/system_manager/filesystem_sub_manager.gd")
+const CoverPaletteDots = preload("res://components/cover_palette_dots.gd")
 
 ## Game details bottom sheet.
 ## Extends M3BottomSheet so the details UI is a native Material 3 overlay
@@ -106,6 +107,7 @@ var _studio_chips: Array[M3Chip] = []
 var _interactive_meta_chips: Array[M3Chip] = []
 var _overflow_chip: M3Chip = null
 var _stars_trailer: Control = null
+var _palette_dots: CoverPaletteDots = null
 var _tab_badge_prev: M3Badge = null
 var _tab_badge_next: M3Badge = null
 
@@ -218,6 +220,9 @@ func refresh_scale() -> void:
 	_setup_tabs()
 	_reduce_top_padding()
 	_set_sheet_height()
+	if is_instance_valid(_palette_dots):
+		_palette_dots.refresh_scale()
+	_layout_metadata_row_overflow()
 	super.refresh_scale()
 
 func _setup_tabs() -> void:
@@ -447,6 +452,7 @@ func _connect_signals() -> void:
 		studio_row.resized.connect(_on_content_row_resized)
 	SystemManager.download.download_completed.connect(_on_download_completed)
 	DataManager.game_updated.connect(_on_game_updated)
+	DataManager.cover_palette_updated.connect(_on_cover_palette_updated)
 
 const RELATED_TAB_INDEX := 2
 const SCREENSHOTS_TAB_INDEX := 3
@@ -891,6 +897,7 @@ func _populate_metadata_chips(game: GameResource) -> void:
 	_interactive_meta_chips.clear()
 	_overflow_chip = null
 	_stars_trailer = null
+	_palette_dots = null
 	var platform_name: String = game.platform if game.platform else "Unknown Platform"
 	_add_metadata_chip(platform_name, "gamepad-variant", true, true, "platform", game.platform_slug, "", platform_name)
 	if _stacked_header:
@@ -934,6 +941,7 @@ func _populate_metadata_chips(game: GameResource) -> void:
 	_overflow_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_overflow_chip.visible = false
 	metadata_row.add_child(_overflow_chip)
+	_populate_palette_dots(game)
 	_populate_rating_stars(game)
 	_layout_metadata_row_overflow()
 	# Overflow visibility is final here; wire the focus chain last.
@@ -966,6 +974,8 @@ func _layout_metadata_row_overflow() -> void:
 	if avail <= 0.0:
 		return
 	var trailer_w := (_stars_trailer.get_combined_minimum_size().x if is_instance_valid(_stars_trailer) else 0.0) + sep * 2.0
+	if is_instance_valid(_palette_dots) and _palette_dots.visible:
+		trailer_w += _palette_dots.get_combined_minimum_size().x + sep
 	var overflow_w := (_overflow_chip.get_combined_minimum_size().x + sep) if is_instance_valid(_overflow_chip) else 0.0
 	var used := 0.0
 	var fit := 0
@@ -1032,6 +1042,36 @@ func _estimate_metadata_row_width() -> float:
 	# Slight under-reservation is safer than spilling.
 	var estimate := content_w - M3Units.dp(8.0)
 	return estimate
+
+func _populate_palette_dots(game: GameResource) -> void:
+	_palette_dots = CoverPaletteDots.new()
+	metadata_row.add_child(_palette_dots)
+	_update_palette_dots(game)
+
+
+func _update_palette_dots(game: GameResource) -> void:
+	if not is_instance_valid(_palette_dots):
+		return
+	_palette_dots.set_colors(
+		game.cover_primary_color,
+		game.cover_secondary_color,
+		game.cover_tertiary_color
+	)
+
+
+func _on_cover_palette_updated(cover_url: String) -> void:
+	if not _current_game or _current_game.cover_url != cover_url:
+		return
+	var updated_game: GameResource = DataManager.get_game_by_id(_current_game.romm_id)
+	if not updated_game:
+		return
+	_current_game.cover_primary_color = updated_game.cover_primary_color
+	_current_game.cover_secondary_color = updated_game.cover_secondary_color
+	_current_game.cover_tertiary_color = updated_game.cover_tertiary_color
+	_current_game.cover_colors_version = updated_game.cover_colors_version
+	_update_palette_dots(_current_game)
+	_layout_metadata_row_overflow()
+
 
 func _populate_rating_stars(game: GameResource) -> void:
 	if game.rating <= 0:
@@ -2029,6 +2069,8 @@ func _on_game_updated(game: GameResource) -> void:
 	_update_hide_button()
 	_update_file_info_display(_current_game)
 	_update_sync_ui()
+	_update_palette_dots(_current_game)
+	_layout_metadata_row_overflow()
 
 func _on_download_completed(item_id: String, success: bool, message: String) -> void:
 	# Check if this download is for our current game
@@ -2053,3 +2095,5 @@ func _on_download_completed(item_id: String, success: bool, message: String) -> 
 		_update_file_info_display(_current_game)
 		# Also refresh the sync UI
 		_update_sync_ui()
+		_update_palette_dots(_current_game)
+		_layout_metadata_row_overflow()

@@ -12,6 +12,7 @@ const FOLD_ID_PRIORITY: Array[String] = ["igdb", "ss", "moby", "ra", "hasheous",
 var data_manager: Node
 
 const FSM = preload("res://managers/system_manager/filesystem_sub_manager.gd")
+const CoverPalette = preload("res://utils/cover_palette.gd")
 
 # Sync state machine
 enum SyncState {
@@ -452,6 +453,10 @@ func _run_sync_threaded(enabled_platforms: Array, disabled_platforms: Array[Stri
 	# cached) up front so they download through the same interleaved dispatch
 	# as per-batch covers instead of in a separate end-of-sync phase.
 	_queue_backfill_covers()
+	# Start palette backfill alongside network sync. Extraction is asynchronous
+	# and deliberately not drained at completion, so a large legacy backlog
+	# cannot add a long tail to an otherwise finished library sync.
+	_queue_backfill_cover_palettes()
 
 	for platform_idx in range(enabled_platforms.size()):
 		var platform = enabled_platforms[platform_idx]
@@ -650,6 +655,9 @@ func _run_sync_threaded(enabled_platforms: Array, disabled_platforms: Array[Stri
 	#    dispatch. Silent (no visible phase) and timeout-guarded so a stalled
 	#    download can never block sync completion.
 	_wait_for_all_cover_downloads()
+	# Catch covers downloaded by this sync plus any cache files that arrived
+	# since the startup pass. Remaining palette work continues in background.
+	_queue_backfill_cover_palettes()
 
 	# 8. Complete sync - defer ALL UI work to main thread
 	print("[SyncThread] All platforms complete, finishing...")
@@ -803,6 +811,55 @@ func _queue_backfill_covers() -> void:
 		_dispatch_covers_to_main_thread()
 
 
+func _queue_backfill_cover_palettes() -> void:
+	"""Sync thread: register missing/outdated palette candidates and schedule
+	the already-cached subset. File checks stay off the main thread. Extraction
+	continues asynchronously after sync rather than adding a backlog drain."""
+	if not data_manager.database.is_database_ready():
+		return
+
+	var rows = _wait_for_async(func(callback: Callable):
+		MemorySubManager.queue_db_task(
+			func():
+				return data_manager.database.query_array(
+					"""SELECT cover_url, MAX(is_favorite) AS fav,
+						MAX(COALESCE(last_played, '')) AS lp,
+						MAX(COALESCE(last_updated, '')) AS lu
+					FROM games
+					WHERE cover_url != '' AND cover_url IS NOT NULL
+						AND (COALESCE(cover_colors_version, 0) < ?
+							OR COALESCE(cover_primary_color, '') = ''
+							OR COALESCE(cover_secondary_color, '') = ''
+							OR COALESCE(cover_tertiary_color, '') = '')
+					GROUP BY cover_url
+					ORDER BY fav DESC, lp DESC, lu DESC, cover_url ASC""",
+					[CoverPalette.ALGORITHM_VERSION]
+				),
+			func(result):
+				callback.call(result if result is Array else null)
+		)
+	, 120000)
+	if rows == null:
+		return
+
+	var candidates: Array[String] = []
+	var cached: Array[String] = []
+	for row in rows:
+		var url := str(row.get("cover_url", ""))
+		if url.is_empty() or not url.begins_with("http"):
+			continue
+		candidates.append(url)
+		if FSM.file_exists(data_manager.cover.get_cached_image_path(url)):
+			cached.append(url)
+	if not candidates.is_empty():
+		_defer_on_main("_queue_cover_palettes_on_main_thread", [candidates, cached])
+
+
+func _queue_cover_palettes_on_main_thread(candidates: Array, cached: Array, invalidate_inflight: bool = false) -> void:
+	data_manager.cover.register_palette_candidates(candidates, invalidate_inflight)
+	data_manager.cover.queue_palette_extractions(cached, true)
+
+
 const COVER_PROGRESS_EVERY: int = 5
 
 func _on_cover_processed() -> void:
@@ -953,6 +1010,7 @@ func _download_covers_on_main_thread(urls: Array[String], on_complete: Callable 
 		if FSM.file_exists(cache_path):
 			# Already cached: no network wait.
 			_sync_covers_cached_count += 1
+			data_manager.cover.queue_downloaded_cover_palette(url)
 			counted_cb.call()
 			continue
 
@@ -981,6 +1039,7 @@ func _download_covers_on_main_thread(urls: Array[String], on_complete: Callable 
 		data_manager.cover.download_cover(url, func(result):
 			if result == DownloadSubManager.ImageResult.OK:
 				_sync_covers_downloaded_count += 1
+				data_manager.cover.queue_downloaded_cover_palette(url)
 			else:
 				_sync_covers_failed_count += 1
 				if result == DownloadSubManager.ImageResult.FAILED:
@@ -1489,6 +1548,27 @@ func _process_batch_sync(items: Array, platform_slug: String, emit_incremental_p
 	# Phase 2: Sibling checks + DB inserts in ONE combined DB task
 	var inserted = _check_and_insert_games_sync(games)
 
+	# Register new/outdated covers before their downloads can complete. Cached
+	# files start extraction immediately; the rest are handled by the download
+	# callback or the end-of-sync backfill. All file checks stay on this worker.
+	var palette_candidates: Array[String] = []
+	var palette_cached: Array[String] = []
+	var palette_seen := {}
+	for game in games:
+		if game.cover_colors_version >= CoverPalette.ALGORITHM_VERSION \
+			and game.cover_primary_color.a > 0.0 and game.cover_secondary_color.a > 0.0 and game.cover_tertiary_color.a > 0.0:
+			continue
+		if not game.has_cover_art or game.cover_url.is_empty() or not game.cover_url.begins_with("http"):
+			continue
+		if palette_seen.has(game.cover_url):
+			continue
+		palette_seen[game.cover_url] = true
+		palette_candidates.append(game.cover_url)
+		if FSM.file_exists(data_manager.cover.get_cached_image_path(game.cover_url)):
+			palette_cached.append(game.cover_url)
+	if not palette_candidates.is_empty():
+		_defer_on_main("_queue_cover_palettes_on_main_thread", [palette_candidates, palette_cached, true])
+
 	# Phase 3: Collect unique cover URLs and queue them for interleaved
 	# dispatch during the sync. Gated on the download budget so we don't fetch
 	# covers that evict-on-insert would immediately swap out.
@@ -1601,7 +1681,7 @@ func _prefetch_existing_rows(games: Array[GameResource]) -> Dictionary:
 	data_manager.database.lock()
 	var placeholders = ", ".join(romm_ids.map(func(_id): return "?"))
 	var existing_result = data_manager.database.query_array_unlocked(
-		"SELECT romm_id, has_local_copy, downloaded_sibling_ids, file_path, cover_group_id, cover_group_master, last_played, play_seconds, title_id, m3u_path, is_favorite, unwrapped, hidden_from_home, selected_sibling_id, save_id, save_usage, siblings FROM games WHERE romm_id IN (%s)" % placeholders,
+		"SELECT romm_id, cover_url, cover_primary_color, cover_secondary_color, cover_tertiary_color, cover_colors_version, has_local_copy, downloaded_sibling_ids, file_path, cover_group_id, cover_group_master, last_played, play_seconds, title_id, m3u_path, is_favorite, unwrapped, hidden_from_home, selected_sibling_id, save_id, save_usage, siblings FROM games WHERE romm_id IN (%s)" % placeholders,
 		romm_ids
 	)
 	for row in existing_result:
@@ -2318,6 +2398,21 @@ func _create_game_from_data(data: Dictionary, platform_slug: String) -> GameReso
 	return game
 
 
+func _existing_palette_color(value: Variant) -> Color:
+	var encoded := str(value).strip_edges()
+	if encoded.is_empty() or not Color.html_is_valid(encoded):
+		return Color.TRANSPARENT
+	return Color.html(encoded)
+
+
+func _preserve_cover_palette(game: GameResource, existing: Dictionary) -> void:
+	var preserve := not game.cover_url.is_empty() and str(existing.get("cover_url", "")) == game.cover_url
+	game.cover_primary_color = _existing_palette_color(existing.get("cover_primary_color", "")) if preserve else Color.TRANSPARENT
+	game.cover_secondary_color = _existing_palette_color(existing.get("cover_secondary_color", "")) if preserve else Color.TRANSPARENT
+	game.cover_tertiary_color = _existing_palette_color(existing.get("cover_tertiary_color", "")) if preserve else Color.TRANSPARENT
+	game.cover_colors_version = int(existing.get("cover_colors_version", 0)) if preserve else 0
+
+
 func _build_insert_query(game: GameResource, existing_row: Dictionary = {}) -> Dictionary:
 	"""Build SQL INSERT query and bindings for a game - used for batch processing.
 
@@ -2343,12 +2438,15 @@ func _build_insert_query(game: GameResource, existing_row: Dictionary = {}) -> D
 
 	var existing = existing_row
 	if existing.is_empty() and data_manager.database.is_database_ready() and game.romm_id > 0:
-		var check_query = "SELECT has_local_copy, downloaded_sibling_ids, file_path, cover_group_id, cover_group_master, last_played, play_seconds, title_id, m3u_path, is_favorite, unwrapped, hidden_from_home, selected_sibling_id, save_id, save_usage, siblings FROM games WHERE romm_id = ?"
+		var check_query = "SELECT cover_url, cover_primary_color, cover_secondary_color, cover_tertiary_color, cover_colors_version, has_local_copy, downloaded_sibling_ids, file_path, cover_group_id, cover_group_master, last_played, play_seconds, title_id, m3u_path, is_favorite, unwrapped, hidden_from_home, selected_sibling_id, save_id, save_usage, siblings FROM games WHERE romm_id = ?"
 		var query_result = data_manager.database.query_array_unlocked(check_query, [game.romm_id])
 		if query_result.size() > 0:
 			existing = query_result[0]
 
 	if not existing.is_empty():
+		# Palette metadata is derived locally, not supplied by RomM. Preserve it
+		# only while the artwork identity (its URL) remains unchanged.
+		_preserve_cover_palette(game, existing)
 		# Preserve download status from existing record
 		if existing.get("has_local_copy", 0) == 1:
 			has_local_copy = 1
@@ -2422,9 +2520,10 @@ func _build_insert_query(game: GameResource, existing_row: Dictionary = {}) -> D
 	var query = """
 		INSERT OR REPLACE INTO games
 		(id, romm_id, title, platform, platform_slug, cover_url, cover_path,
+		 cover_primary_color, cover_secondary_color, cover_tertiary_color, cover_colors_version,
 		 file_name, file_path, file_size, has_local_copy, last_updated,
 		 description, genres, rating, release_date, siblings, selected_sibling_id, is_master_entry, downloaded_sibling_ids, has_cover_art, last_played, play_seconds, title_id, save_id, save_usage, cover_group_id, cover_group_master, igdb_metadata, igdb_id, provider_ids, m3u_path, status, now_playing, backlogged, hidden, is_favorite, unwrapped, hidden_from_home, screenshots)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	"""
 
 	var bindings = [
@@ -2435,6 +2534,10 @@ func _build_insert_query(game: GameResource, existing_row: Dictionary = {}) -> D
 		game.platform_slug,
 		game.cover_url,
 		game.cover_path,
+		"#" + game.cover_primary_color.to_html(false) if game.cover_primary_color.a > 0.0 else "",
+		"#" + game.cover_secondary_color.to_html(false) if game.cover_secondary_color.a > 0.0 else "",
+		"#" + game.cover_tertiary_color.to_html(false) if game.cover_tertiary_color.a > 0.0 else "",
+		game.cover_colors_version,
 		game.file_name,
 		file_path,
 		game.file_size,
