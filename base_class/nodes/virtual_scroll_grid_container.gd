@@ -280,6 +280,9 @@ var _scroll_axis_lines: int:
 ## Push the zoom model's inputs. Cheap (key compare short-circuits); called
 ## at the top of every zoom facade so stale caches are impossible.
 func _sync_zoom_model_inputs() -> void:
+	# Startup setup and zoom queries can run before deferred work. Never let
+	# them resolve stops against the compiled Fill/Standard cache defaults.
+	_refresh_cached_settings()
 	_zoom_model.resolution_enabled = not startup_layout_suppressed
 	_zoom_model.configure(int(view_mode), vertical, grid_separation, _get_base_dimensions_for_mode())
 	_zoom_model.set_available_size(_get_available_size() if _has_valid_available_size() else Vector2.ZERO)
@@ -720,6 +723,10 @@ func _capture_scroll_anchor(focus_index: int, allow_end_pin: bool = false) -> Gr
 	return anchor
 
 func _ready():
+	# UIManager synchronizes CardSettingsState before creating any views, so the
+	# saved media/display settings are already safe to read here. Hydrate before
+	# setup, zoom, or pool creation can consume the Fill/Standard defaults.
+	_refresh_cached_settings()
 	_setup_ui()
 
 	# frame_pre_draw (visual stamping) is owned by _visual_sync (connects in
@@ -734,11 +741,9 @@ func _ready():
 		resized.connect(_on_resized)
 		_setup_internal_resize_debounce()
 
-	# Load initial grid separation and focus scale from settings
-	# Use call_deferred to ensure DataManager is fully initialized
+	# Load initial grid separation and focus scale from settings.
 	call_deferred("_update_grid_separation_from_settings")
 	call_deferred("_update_focus_scale_from_settings")
-	call_deferred("_refresh_cached_settings")
 	_focus.connect_viewport.call_deferred()
 	_ready_called = true
 
@@ -1012,14 +1017,6 @@ func _refresh_cached_settings() -> void:
 	# of sync with the persisted setting (double-click menu bug).
 	pagination_enabled = state.pagination_enabled
 	staggered = state.grid_staggered
-
-	# Initialize last-layout tracking on the first cache so the first real
-	# layout doesn't treat the initial state as a "change" and re-snap the
-	# saved zoom to a different stop.
-	if _last_layout_display_mode < 0:
-		_last_layout_display_mode = _cached_card_display_mode
-	if _last_layout_media_aspect_ratio < 0:
-		_last_layout_media_aspect_ratio = state.media_aspect_ratio
 
 var _last_resized_size: Vector2 = Vector2.ZERO
 var _last_viewport_arg_size: Vector2 = Vector2.ZERO
@@ -1805,7 +1802,10 @@ func _recalculate_layout():
 	if restored_scroll >= 0.0:
 		_write_scroll_during_recalc(restored_scroll)
 
-	var update_card_geometry = card_geometry_changed or structure_changed
+	# LIST/CAROUSEL cell dimensions can remain identical when only the media
+	# ratio or effective display mode changes. Reapply those inputs to existing
+	# cards even when the outer cell itself needs no geometry update.
+	var update_card_geometry = card_geometry_changed or structure_changed or display_or_ratio_changed
 	var update_focus = focus_changed
 
 	for card in _active_cards:
