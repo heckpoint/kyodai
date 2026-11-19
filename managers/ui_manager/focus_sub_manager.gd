@@ -31,7 +31,18 @@ const CANVAS_LAYER: int = 128
 const DEFAULT_GRID_DRAW_INDEX: int = 2_000_000
 
 enum Shape { BOX, PILL, CIRCLE, CORNERS }
-enum ColorMode { PRIMARY, MIRROR, CUSTOM }
+enum ColorMode { PRIMARY, MIRROR, CUSTOM, GRADIENT }
+enum PaletteRole {
+	PRIMARY,
+	SECONDARY,
+	TERTIARY,
+	PRIMARY_SECONDARY,
+	PRIMARY_TERTIARY,
+	SECONDARY_TERTIARY,
+	ALL_THREE,
+}
+enum GradientSource { ACCENT, RAINBOW, GAME }
+enum GradientAnim { STATIC, EVOLVE, CHASE }
 enum MovementAnim { NONE, POP, FOLLOW }
 enum IdleAnim { NONE, BREATHE, CHASE }
 
@@ -92,20 +103,46 @@ var color_mode: ColorMode = ColorMode.PRIMARY:
 		color_mode = value
 		_on_config_changed()
 
+## Independent spatial/hue animation for GRADIENT color mode. Alpha animation
+## remains controlled by idle_anim, so the two can be stacked.
+var gradient_anim: GradientAnim = GradientAnim.STATIC:
+	set(value):
+		gradient_anim = value
+		_on_config_changed()
+
+var palette_role: PaletteRole = PaletteRole.PRIMARY:
+	set(value):
+		palette_role = value
+		_on_config_changed()
+
+## Rainbow remains the default to preserve the original gradient appearance.
+var gradient_source: GradientSource = GradientSource.RAINBOW:
+	set(value):
+		gradient_source = value
+		_on_config_changed()
+
 var custom_color: Color = Color.WHITE:
 	set(value):
 		custom_color = value
 		_on_config_changed()
 
-var glow_size_dp: float = 0.0:
+var neon_glow: bool = true:
+	set(value):
+		neon_glow = value
+		_on_config_changed()
+
+var glow_intensity: float = 0.6:
+	set(value):
+		glow_intensity = clampf(value, 0.0, 1.0)
+		_on_config_changed()
+
+var glow_size_dp: float = 8.0:
 	set(value):
 		glow_size_dp = maxf(0.0, value)
 		_on_config_changed()
 
-var glow_color: Color = Color(0.0, 0.0, 0.0, 0.35):
-	set(value):
-		glow_color = value
-		_on_config_changed()
+## Derived by _apply_color; changing it must not re-enter config handling.
+var glow_color: Color = Color(0.0, 0.0, 0.0, 0.35)
 
 ## NONE snaps the ring to each newly focused control, POP snaps and settles
 ## with a quick scale-down, FOLLOW tweens between controls.
@@ -125,14 +162,29 @@ var corner_tick_dp: float = 10.0:
 		corner_tick_dp = maxf(1.0, value)
 		_on_config_changed()
 
+const NEON_SHADER = preload("res://shaders/focus_ring_neon.gdshader")
+const NEON_GLOW_STROKE_EXTRA_DP: float = 5.0
 const BREATHE_PERIOD: float = 1.6
 const BREATHE_MIN_ALPHA: float = 0.3
-const ORBIT_PERIOD: float = 2.0
+const ORBIT_PERIOD: float = 4.0
 ## Fraction of the perimeter covered by the CHASE comet (head + fading tail).
 const ORBIT_WINDOW: float = 0.15
 const ORBIT_POINTS: int = 16
 ## Base ring alpha multiplier while the CHASE comet orbits over it.
 const ORBIT_BASE_ALPHA: float = 0.35
+
+## Fixed five-color palette. Evolve cycles selected roles through fixed stops;
+## Chase rotates the whole gradient through space.
+const GRADIENT_COLORS = [
+	Color(0.10, 0.90, 1.00),
+	Color(0.20, 0.38, 1.00),
+	Color(0.58, 0.22, 1.00),
+	Color(1.00, 0.16, 0.65),
+	Color(1.00, 0.62, 0.18),
+]
+const GRADIENT_HUE_OFFSETS = [-0.035, -0.015, 0.0, 0.018, 0.040]
+const GRADIENT_VALUE_SCALE = [0.84, 0.96, 1.0, 0.94, 0.86]
+const GRADIENT_EVOLVE_PERIOD: float = 6.0
 
 ## POP movement: the ring snaps to the new target slightly enlarged, then
 ## eases back down to its exact pose.
@@ -145,6 +197,9 @@ const POP_DURATION: float = 0.15
 
 var _canvas: RID
 var _ring_item: RID
+var _neon_item: RID
+var _neon_material: ShaderMaterial = null
+var _neon_texture: ImageTexture = null
 var _ring_style: StyleBoxFlat = null
 var _attached_viewport: Viewport = null
 ## Grid visual layer RID when the focused control is inside a grid; invalid
@@ -161,6 +216,7 @@ var _ring_rect := Rect2()
 var _ring_radius: float = 0.0
 var _ring_shape: int = Shape.BOX
 var _ring_color: Color = Color.WHITE
+var _base_gradient_colors: Array[Color] = []
 var _ring_visible: bool = false
 var _dest_rect := Rect2()
 var _dest_radius: float = 0.0
@@ -168,7 +224,9 @@ var _dest_shape: int = Shape.BOX
 
 var _chase_tween: Tween = null
 var _idle_tween: Tween = null
+var _gradient_tween: Tween = null
 var _orbit_t: float = 0.0
+var _gradient_t: float = 0.0
 var _pop_tween: Tween = null
 var _pop_scale: float = 1.0
 var _target_prev_notify: bool = false
@@ -180,6 +238,8 @@ var _target_prev_notify: bool = false
 func _ready() -> void:
 	ui_manager = get_parent()
 	_instance = self
+	if not DataManager.cover_palette_updated.is_connected(_on_cover_palette_updated):
+		DataManager.cover_palette_updated.connect(_on_cover_palette_updated)
 
 	_ring_style = StyleBoxFlat.new()
 	_ring_style.bg_color = Color.TRANSPARENT
@@ -191,6 +251,16 @@ func _ready() -> void:
 	_ring_item = RenderingServer.canvas_item_create()
 	RenderingServer.canvas_item_set_parent(_ring_item, _canvas)
 	RenderingServer.canvas_item_set_visible(_ring_item, false)
+
+	_neon_item = RenderingServer.canvas_item_create()
+	RenderingServer.canvas_item_set_parent(_neon_item, _canvas)
+	RenderingServer.canvas_item_set_visible(_neon_item, false)
+	_neon_material = ShaderMaterial.new()
+	_neon_material.shader = NEON_SHADER
+	RenderingServer.canvas_item_set_material(_neon_item, _neon_material.get_rid())
+	var white_image := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	white_image.fill(Color.WHITE)
+	_neon_texture = ImageTexture.create_from_image(white_image)
 
 	var vp := get_viewport()
 	if vp:
@@ -206,6 +276,8 @@ func _initial_sync() -> void:
 func _exit_tree() -> void:
 	if _instance == self:
 		_instance = null
+	if DataManager.cover_palette_updated.is_connected(_on_cover_palette_updated):
+		DataManager.cover_palette_updated.disconnect(_on_cover_palette_updated)
 	_kill_chase_tween()
 	_kill_pop_tween()
 	_stop_idle()
@@ -216,6 +288,11 @@ func _exit_tree() -> void:
 	if _ring_item.is_valid():
 		RenderingServer.free_rid(_ring_item)
 		_ring_item = RID()
+	if _neon_item.is_valid():
+		RenderingServer.free_rid(_neon_item)
+		_neon_item = RID()
+	_neon_material = null
+	_neon_texture = null
 	if _canvas.is_valid():
 		RenderingServer.free_rid(_canvas)
 		_canvas = RID()
@@ -300,6 +377,8 @@ func _track_target(control: Control) -> void:
 	control.resized.connect(_on_target_moved)
 	control.visibility_changed.connect(_on_target_visibility_changed)
 	control.tree_exiting.connect(_on_target_tree_exiting)
+	if control.has_signal("game_changed"):
+		control.connect("game_changed", _on_target_game_changed)
 
 func _untrack_target() -> void:
 	var t := _get_target()
@@ -313,6 +392,8 @@ func _untrack_target() -> void:
 			t.visibility_changed.disconnect(_on_target_visibility_changed)
 		if t.tree_exiting.is_connected(_on_target_tree_exiting):
 			t.tree_exiting.disconnect(_on_target_tree_exiting)
+		if t.has_signal("game_changed") and t.is_connected("game_changed", _on_target_game_changed):
+			t.disconnect("game_changed", _on_target_game_changed)
 	_target_ref = null
 
 func _on_target_moved() -> void:
@@ -342,6 +423,32 @@ func _on_target_moved() -> void:
 	_ring_radius = _dest_radius
 	_redraw_ring()
 
+func _on_target_game_changed(_game: Variant) -> void:
+	_refresh_focus_palette()
+
+func _on_cover_palette_updated(cover_url: String) -> void:
+	if color_mode != ColorMode.GRADIENT or gradient_source != GradientSource.GAME:
+		return
+	var target := _get_target()
+	if target == null or not _ring_visible or not target.has_method("m3_get_focus_palette"):
+		return
+	var palette: Dictionary = target.m3_get_focus_palette()
+	if palette.get("source_id", "") != cover_url:
+		return
+	if target.has_method("m3_refresh_focus_palette"):
+		target.m3_refresh_focus_palette(cover_url)
+	_refresh_focus_palette()
+
+func _refresh_focus_palette() -> void:
+	if color_mode != ColorMode.GRADIENT or gradient_source != GradientSource.GAME or not _ring_visible:
+		return
+	var target := _get_target()
+	if target == null:
+		return
+	var geo := _resolve_geometry(target)
+	_apply_color(geo)
+	_redraw_ring()
+
 func _on_target_visibility_changed() -> void:
 	var t := _get_target()
 	if t == null:
@@ -368,10 +475,13 @@ func _resolve_geometry(control: Control) -> Dictionary:
 	var radius: float = geo.get("radius", -1.0)
 	var shape: int = geo.get("shape", ring_shape)
 	var color: Color = geo.get("color", Color(0.0, 0.0, 0.0, 0.0))
+	var focus_palette: Dictionary = {}
+	if control.has_method("m3_get_focus_palette"):
+		focus_palette = control.m3_get_focus_palette()
 	if radius < 0.0:
 		radius = M3Units.dp(default_radius_dp)
 	radius = minf(radius, minf(rect.size.x, rect.size.y) * 0.5)
-	return {"rect": rect, "radius": radius, "shape": shape, "color": color}
+	return {"rect": rect, "radius": radius, "shape": shape, "color": color, "palette": focus_palette}
 
 # ============================================================================
 # Ring presentation
@@ -413,6 +523,8 @@ func _set_ring_visible(value: bool) -> void:
 	_ring_visible = value
 	if _ring_item.is_valid():
 		RenderingServer.canvas_item_set_visible(_ring_item, value)
+	if _neon_item.is_valid():
+		RenderingServer.canvas_item_set_visible(_neon_item, value)
 
 func _attach_to_viewport(vp: Viewport) -> void:
 	if _attached_viewport == vp:
@@ -435,10 +547,13 @@ func _update_ring_parent(control: Control) -> void:
 		return
 	if _ring_parent_grid.is_valid():
 		RenderingServer.canvas_item_set_parent(_ring_item, _ring_parent_grid)
+		RenderingServer.canvas_item_set_parent(_neon_item, _ring_parent_grid)
 		_update_ring_draw_index(control)
 	else:
 		RenderingServer.canvas_item_set_parent(_ring_item, _canvas)
+		RenderingServer.canvas_item_set_parent(_neon_item, _canvas)
 		RenderingServer.canvas_item_set_draw_index(_ring_item, 0)
+		RenderingServer.canvas_item_set_draw_index(_neon_item, 0)
 
 func _update_ring_draw_index(control: Control) -> void:
 	if not _ring_parent_grid.is_valid() or not _ring_item.is_valid():
@@ -447,6 +562,8 @@ func _update_ring_draw_index(control: Control) -> void:
 	if control.has_method("m3_get_focus_draw_index"):
 		draw_index = control.m3_get_focus_draw_index()
 	RenderingServer.canvas_item_set_draw_index(_ring_item, draw_index)
+	if _neon_item.is_valid():
+		RenderingServer.canvas_item_set_draw_index(_neon_item, draw_index)
 
 ## Walks ancestors for a VirtualScrollGridContainer (duck-typed via its public
 ## visual layer accessor). Returns an invalid RID when not inside a grid.
@@ -462,35 +579,140 @@ func _find_grid_ring_parent(control: Control) -> RID:
 
 func _apply_style() -> void:
 	_ring_style.set_border_width_all(M3Units.dpi(stroke_width_dp))
-	if glow_size_dp > 0.0:
-		_ring_style.shadow_size = M3Units.dpi(glow_size_dp)
-		_ring_style.shadow_color = glow_color
-	else:
-		_ring_style.shadow_size = 0
-		_ring_style.shadow_color = Color.TRANSPARENT
+	# Full-ring glow is shader-based. A StyleBox shadow fills the entire rounded
+	# silhouette, which would tint the card; never enable that path.
+	_ring_style.shadow_size = 0
+	_ring_style.shadow_color = glow_color if neon_glow else Color.TRANSPARENT
+
+func _selected_palette_roles() -> Array:
+	match palette_role:
+		PaletteRole.SECONDARY:
+			return [PaletteRole.SECONDARY]
+		PaletteRole.TERTIARY:
+			return [PaletteRole.TERTIARY]
+		PaletteRole.PRIMARY_SECONDARY:
+			return [PaletteRole.PRIMARY, PaletteRole.SECONDARY]
+		PaletteRole.PRIMARY_TERTIARY:
+			return [PaletteRole.PRIMARY, PaletteRole.TERTIARY]
+		PaletteRole.SECONDARY_TERTIARY:
+			return [PaletteRole.SECONDARY, PaletteRole.TERTIARY]
+		PaletteRole.ALL_THREE:
+			return [PaletteRole.PRIMARY, PaletteRole.SECONDARY, PaletteRole.TERTIARY]
+		_:
+			return [PaletteRole.PRIMARY]
+
+func _accent_palette_color(role: PaletteRole) -> Color:
+	match role:
+		PaletteRole.SECONDARY:
+			return M3Theme.get_secondary()
+		PaletteRole.TERTIARY:
+			return M3Theme.get_tertiary()
+		_:
+			return M3Theme.get_primary()
+
+func _game_palette_color(palette: Dictionary, role: PaletteRole, fallback: Color) -> Color:
+	var key := "primary"
+	match role:
+		PaletteRole.SECONDARY:
+			key = "secondary"
+		PaletteRole.TERTIARY:
+			key = "tertiary"
+	var game_color: Color = palette.get(key, Color.TRANSPARENT)
+	return game_color if game_color.a > 0.0 else fallback
+
+func _resolve_gradient_colors(geo: Dictionary) -> Array[Color]:
+	var colors: Array[Color] = []
+	if gradient_source == GradientSource.RAINBOW:
+		for color in GRADIENT_COLORS:
+			colors.append(color)
+		return colors
+	var base_colors: Array[Color] = []
+	var game_palette: Dictionary = geo.get("palette", {})
+	for role in _selected_palette_roles():
+		var base_color := _accent_palette_color(role)
+		if gradient_source == GradientSource.GAME:
+			base_color = _game_palette_color(game_palette, role, base_color)
+		base_colors.append(base_color)
+	if base_colors.size() == 1:
+		return _expand_gradient_color(base_colors[0])
+	if base_colors.size() == 2:
+		return _expand_dual_gradient(base_colors[0], base_colors[1])
+	return _expand_triad_gradient(base_colors[0], base_colors[1], base_colors[2])
+
+func _expand_gradient_color(base_color: Color) -> Array[Color]:
+	var colors: Array[Color] = []
+	var saturation := clampf(maxf(base_color.s, 0.60), 0.0, 0.96)
+	var value := clampf(maxf(base_color.v, 0.92), 0.0, 1.0)
+	for i in range(5):
+		var hue := fposmod(base_color.h + float(GRADIENT_HUE_OFFSETS[i]), 1.0)
+		var stop_value := clampf(value * float(GRADIENT_VALUE_SCALE[i]), 0.70, 1.0)
+		colors.append(Color.from_hsv(hue, saturation, stop_value, 1.0))
+	return colors
+
+func _expand_dual_gradient(a: Color, b: Color) -> Array[Color]:
+	var a_variants := _expand_gradient_color(a)
+	var b_variants := _expand_gradient_color(b)
+	var colors: Array[Color] = []
+	for index in [0, 2, 4]:
+		colors.append(a_variants[index])
+	for index in [0, 2, 4]:
+		colors.append(b_variants[index])
+	return colors
+
+func _expand_triad_gradient(a: Color, b: Color, c: Color) -> Array[Color]:
+	var a_variants := _expand_gradient_color(a)
+	var b_variants := _expand_gradient_color(b)
+	var c_variants := _expand_gradient_color(c)
+	var colors: Array[Color] = []
+	for variants in [a_variants, b_variants, c_variants]:
+		for index in [0, 2, 4]:
+			colors.append(variants[index])
+	return colors
 
 func _apply_color(geo: Dictionary) -> void:
+	_base_gradient_colors = _resolve_gradient_colors(geo)
+	var source_color := Color.WHITE
 	match color_mode:
 		ColorMode.CUSTOM:
-			_ring_color = custom_color
+			source_color = custom_color
 		ColorMode.MIRROR:
 			var c: Color = geo.color
-			_ring_color = c if c.a > 0.0 else M3Theme.get_primary()
+			source_color = c if c.a > 0.0 else M3Theme.get_primary()
+		ColorMode.GRADIENT:
+			# Palette RGB is sampled per fragment/vertex; white supplies alpha.
+			source_color = Color.WHITE
 		_:
-			_ring_color = M3Theme.get_primary()
+			source_color = M3Theme.get_primary()
+
+	if neon_glow:
+		# Keep the hue, but give the core a brighter, slightly white-hot center.
+		var core := source_color.lerp(Color.WHITE, 0.08)
+		core.s = clampf(core.s, 0.65, 1.0)
+		core.v = clampf(core.v, 0.9, 1.0)
+		core.a = source_color.a
+		_ring_color = core
+		glow_color = Color(core.r, core.g, core.b, source_color.a * glow_intensity * 0.65)
+	else:
+		_ring_color = source_color
+		glow_color = Color.TRANSPARENT
 	_ring_style.border_color = _ring_color
+	_ring_style.shadow_color = glow_color
 
 func _redraw_ring() -> void:
 	if not _ring_item.is_valid():
 		return
 	RenderingServer.canvas_item_clear(_ring_item)
+	if _neon_item.is_valid():
+		RenderingServer.canvas_item_clear(_neon_item)
 	if not _ring_visible:
 		return
 	var orbiting := idle_anim == IdleAnim.CHASE
+	var use_shader := neon_glow or color_mode == ColorMode.GRADIENT
 	var base_color := _ring_color
 	if orbiting:
 		base_color.a *= ORBIT_BASE_ALPHA
 	_ring_style.border_color = base_color
+	_ring_style.shadow_color = Color(base_color.r, base_color.g, base_color.b, base_color.a * glow_intensity * 0.65) if neon_glow else Color.TRANSPARENT
 	var offset := M3Units.dp(offset_dp)
 	var rect := _ring_rect.grow(offset)
 	var radius := minf(_ring_radius + offset, minf(rect.size.x, rect.size.y) * 0.5)
@@ -503,20 +725,112 @@ func _redraw_ring() -> void:
 	M3Theme.configure_smooth_corners(_ring_style, minf(rect.size.x, rect.size.y) * 0.5)
 	match _ring_shape:
 		Shape.PILL:
-			_ring_style.set_corner_radius_all(int(minf(rect.size.x, rect.size.y) * 0.5))
-			_ring_style.draw(_ring_item, rect)
+			radius = minf(rect.size.x, rect.size.y) * 0.5
+			if use_shader:
+				_draw_neon_ring(rect, radius, base_color)
+			else:
+				_ring_style.set_corner_radius_all(int(radius))
+				_ring_style.draw(_ring_item, rect)
 		Shape.CIRCLE:
 			var side := minf(rect.size.x, rect.size.y)
 			var square := Rect2(rect.get_center() - Vector2(side, side) * 0.5, Vector2(side, side))
-			_ring_style.set_corner_radius_all(int(side * 0.5))
-			_ring_style.draw(_ring_item, square)
+			radius = side * 0.5
+			if use_shader:
+				_draw_neon_ring(square, radius, base_color)
+			else:
+				_ring_style.set_corner_radius_all(int(radius))
+				_ring_style.draw(_ring_item, square)
 		Shape.CORNERS:
 			_draw_corners(rect, radius)
 		_:
-			_ring_style.set_corner_radius_all(int(radius))
-			_ring_style.draw(_ring_item, rect)
+			if use_shader:
+				_draw_neon_ring(rect, radius, base_color)
+			else:
+				_ring_style.set_corner_radius_all(int(radius))
+				_ring_style.draw(_ring_item, rect)
 	if orbiting:
 		_draw_orbit_comet(rect, radius)
+
+func _draw_neon_ring(rect: Rect2, radius: float, color: Color) -> void:
+	if not _neon_item.is_valid() or _neon_material == null or _neon_texture == null:
+		return
+	# Match the shader's 3x feathered glow range. Keep enough room for the core
+	# when glow size is zero, plus safety padding for antialiased coverage.
+	# border_size remains the actual ring rect; the SDF never fills its center.
+	var glow_width := M3Units.dp(glow_size_dp)
+	var stroke_width := M3Units.dpi(stroke_width_dp)
+	var spread := maxf(glow_width * 3.0, stroke_width) + 2.0
+	var draw_rect := rect.grow(spread)
+	_neon_material.set_shader_parameter("neon_color", color)
+	_neon_material.set_shader_parameter("quad_size", draw_rect.size)
+	_neon_material.set_shader_parameter("border_size", rect.size)
+	_neon_material.set_shader_parameter("corner_radius", radius)
+	_neon_material.set_shader_parameter("stroke_width", stroke_width)
+	_neon_material.set_shader_parameter("glow_width", glow_width)
+	_neon_material.set_shader_parameter("glow_strength", glow_intensity if neon_glow else 0.0)
+	_update_gradient_material()
+	RenderingServer.canvas_item_add_texture_rect(
+		_neon_item,
+		draw_rect,
+		_neon_texture.get_rid(),
+		false,
+		Color.WHITE,
+		false
+	)
+
+func _current_gradient_palette() -> Array[Color]:
+	var palette: Array[Color] = []
+	var source_colors: Array[Color] = _base_gradient_colors
+	if source_colors.is_empty():
+		for color in GRADIENT_COLORS:
+			source_colors.append(color)
+	var count := source_colors.size()
+	for i in range(count):
+		if gradient_anim != GradientAnim.EVOLVE:
+			palette.append(source_colors[i])
+			continue
+		# Every stop cycles through the complete approved palette. In mixed
+		# palettes, adjacent role clusters run in opposite directions so Primary
+		# becomes Secondary while Secondary becomes Primary, rather than the
+		# whole gradient merely translating as it does in Chase.
+		var direction := 1.0
+		if count == 6 or count == 9:
+			direction = 1.0 if floori(float(i) / 3.0) % 2 == 0 else -1.0
+		var phase := fposmod(float(i) / float(count) + _gradient_t * direction, 1.0)
+		var scaled := phase * float(count)
+		var index := int(floor(scaled)) % count
+		var next_index := (index + 1) % count
+		var fraction: float = scaled - floor(scaled)
+		fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+		palette.append(source_colors[index].lerp(source_colors[next_index], fraction))
+	return palette
+
+func _sample_gradient(palette: Array[Color], t: float) -> Color:
+	if palette.is_empty():
+		return Color.WHITE
+	var scaled := fposmod(t, 1.0) * float(palette.size())
+	var index := int(floor(scaled)) % palette.size()
+	var next_index := (index + 1) % palette.size()
+	var fraction: float = scaled - floor(scaled)
+	fraction = fraction * fraction * (3.0 - 2.0 * fraction)
+	return palette[index].lerp(palette[next_index], fraction)
+
+func _gradient_spatial_t(t: float) -> float:
+	var phase := _orbit_t if gradient_anim == GradientAnim.CHASE else 0.0
+	return fposmod(t - phase, 1.0)
+
+func _update_gradient_material() -> void:
+	if _neon_material == null:
+		return
+	var enabled := color_mode == ColorMode.GRADIENT
+	_neon_material.set_shader_parameter("gradient_enabled", enabled)
+	_neon_material.set_shader_parameter("gradient_phase", _orbit_t if gradient_anim == GradientAnim.CHASE else 0.0)
+	if not enabled:
+		return
+	var palette := _current_gradient_palette()
+	_neon_material.set_shader_parameter("gradient_color_count", palette.size())
+	for i in range(palette.size()):
+		_neon_material.set_shader_parameter("gradient_color_%d" % i, palette[i])
 
 ## Walk the rounded-rect perimeter; t in [0,1) wraps. Starts at the top edge
 ## (after the top-left arc) and proceeds clockwise.
@@ -565,23 +879,76 @@ func _perimeter_point(rect: Rect2, radius: float, t: float) -> Vector2:
 			return c + Vector2(cos(a), sin(a)) * r
 	return tl
 
+## Inverse of _perimeter_point for direct-drawn Corners colors. The shader uses
+## the same segment ordering so both paths share an identical gradient position.
+func _perimeter_progress_at_point(rect: Rect2, radius: float, point: Vector2) -> float:
+	var half_size := rect.size * 0.5
+	var r := clampf(radius, 0.001, minf(half_size.x, half_size.y))
+	var local := point - rect.get_center()
+	var corner := half_size - Vector2.ONE * r
+	var q := local.abs()
+	var straight_w := maxf(rect.size.x - 2.0 * r, 0.0)
+	var straight_h := maxf(rect.size.y - 2.0 * r, 0.0)
+	var arc := r * PI * 0.5
+	var total := 2.0 * (straight_w + straight_h) + 4.0 * arc
+	if total <= 0.0:
+		return 0.0
+	var distance := 0.0
+	if q.x <= corner.x:
+		if local.y < 0.0:
+			distance = local.x + half_size.x - r
+		else:
+			distance = straight_w + 2.0 * arc + straight_h + half_size.x - r - local.x
+	elif q.y <= corner.y:
+		if local.x > 0.0:
+			distance = straight_w + arc + local.y + half_size.y - r
+		else:
+			distance = 2.0 * straight_w + 3.0 * arc + straight_h + half_size.y - r - local.y
+	else:
+		var center := Vector2(signf(local.x) * corner.x, signf(local.y) * corner.y)
+		var offset := local - center
+		var angle := atan2(offset.y, offset.x)
+		if local.x > 0.0 and local.y < 0.0:
+			distance = straight_w + (angle + PI * 0.5) * r
+		elif local.x > 0.0:
+			distance = straight_w + arc + straight_h + angle * r
+		elif local.y > 0.0:
+			distance = 2.0 * straight_w + 2.0 * arc + straight_h + (angle - PI * 0.5) * r
+		else:
+			distance = 2.0 * straight_w + 3.0 * arc + 2.0 * straight_h + (angle + PI) * r
+	return fposmod(distance / total, 1.0)
+
 func _draw_orbit_comet(rect: Rect2, radius: float) -> void:
 	var width := M3Units.dp(stroke_width_dp)
 	if width <= 0.0:
 		return
+	var gradient_enabled := color_mode == ColorMode.GRADIENT
+	var palette: Array[Color] = _current_gradient_palette() if gradient_enabled else []
 	var points := PackedVector2Array()
 	var colors := PackedColorArray()
 	points.resize(ORBIT_POINTS)
 	colors.resize(ORBIT_POINTS)
 	for i in range(ORBIT_POINTS):
 		var f := float(i) / float(ORBIT_POINTS - 1)  # 0 = tail, 1 = head
-		points[i] = _perimeter_point(rect, radius, _orbit_t - ORBIT_WINDOW * (1.0 - f))
-		var c := _ring_color
+		var point_t := fposmod(_orbit_t - ORBIT_WINDOW * (1.0 - f), 1.0)
+		points[i] = _perimeter_point(rect, radius, point_t)
+		var c := _sample_gradient(palette, _gradient_spatial_t(point_t)) if gradient_enabled else _ring_color
 		c.a *= f * f
 		colors[i] = c
+	if neon_glow and glow_intensity > 0.0:
+		var halo_colors := PackedColorArray(colors)
+		for i in range(halo_colors.size()):
+			halo_colors[i].a *= glow_intensity * 0.65
+		var halo_width := width + M3Units.dp(NEON_GLOW_STROKE_EXTRA_DP)
+		RenderingServer.canvas_item_add_polyline(_ring_item, points, halo_colors, halo_width, true)
+		var head_halo := _ring_style.shadow_color
+		if gradient_enabled:
+			head_halo = colors[ORBIT_POINTS - 1]
+			head_halo.a *= glow_intensity * 0.65
+		RenderingServer.canvas_item_add_circle(_ring_item, points[ORBIT_POINTS - 1], halo_width * 0.5, head_halo)
 	RenderingServer.canvas_item_add_polyline(_ring_item, points, colors, width, true)
 	# Round nose on the comet head (polylines end in butt caps).
-	RenderingServer.canvas_item_add_circle(_ring_item, points[ORBIT_POINTS - 1], width * 0.5, _ring_color)
+	RenderingServer.canvas_item_add_circle(_ring_item, points[ORBIT_POINTS - 1], width * 0.5, colors[ORBIT_POINTS - 1])
 
 func _draw_corners(rect: Rect2, radius: float) -> void:
 	var width := M3Units.dp(stroke_width_dp)
@@ -617,7 +984,8 @@ func _draw_corners(rect: Rect2, radius: float) -> void:
 	const SEGMENTS_MIN := 4
 	const SEGMENTS_MAX := 48
 	var segments := clampi(int(ceil(radius * sweep / SEGMENT_TARGET_PX)), SEGMENTS_MIN, SEGMENTS_MAX)
-	var cap_color: Color = colors[0]
+	var gradient_enabled := color_mode == ColorMode.GRADIENT
+	var palette: Array[Color] = _current_gradient_palette() if gradient_enabled else []
 	for c in corners:
 		var center: Vector2 = c[0]
 		# Center the (possibly shrunk) sweep on the corner bisector.
@@ -631,10 +999,26 @@ func _draw_corners(rect: Rect2, radius: float) -> void:
 			var a := lerpf(a0, a1, float(i) / float(segments))
 			points.append(center + Vector2(cos(a), sin(a)) * radius)
 		points.append(p1 + c[3] * tick)
-		RenderingServer.canvas_item_add_polyline(_ring_item, points, colors, width, true)
+		var point_colors := PackedColorArray()
+		for point in points:
+			var color := colors[0]
+			if gradient_enabled:
+				var perimeter_t := _perimeter_progress_at_point(r, radius, point)
+				color = _sample_gradient(palette, _gradient_spatial_t(perimeter_t))
+				color.a = colors[0].a
+			point_colors.append(color)
+		if neon_glow and glow_intensity > 0.0:
+			var halo_width := width + M3Units.dp(NEON_GLOW_STROKE_EXTRA_DP)
+			var halo_colors := PackedColorArray(point_colors)
+			for i in range(halo_colors.size()):
+				halo_colors[i].a *= glow_intensity * 0.65
+			RenderingServer.canvas_item_add_polyline(_ring_item, points, halo_colors, halo_width, true)
+			RenderingServer.canvas_item_add_circle(_ring_item, points[0], halo_width * 0.5, halo_colors[0])
+			RenderingServer.canvas_item_add_circle(_ring_item, points[points.size() - 1], halo_width * 0.5, halo_colors[halo_colors.size() - 1])
+		RenderingServer.canvas_item_add_polyline(_ring_item, points, point_colors, width, true)
 		# Polylines have butt caps; stamp circles on the tips for pill ends.
-		RenderingServer.canvas_item_add_circle(_ring_item, points[0], width * 0.5, cap_color)
-		RenderingServer.canvas_item_add_circle(_ring_item, points[points.size() - 1], width * 0.5, cap_color)
+		RenderingServer.canvas_item_add_circle(_ring_item, points[0], width * 0.5, point_colors[0])
+		RenderingServer.canvas_item_add_circle(_ring_item, points[points.size() - 1], width * 0.5, point_colors[point_colors.size() - 1])
 
 # ============================================================================
 # Animation
@@ -689,6 +1073,7 @@ func _restart_idle() -> void:
 	if not _ring_visible:
 		return
 	_orbit_last_redraw_ms = 0
+	_gradient_last_update_ms = 0
 	match idle_anim:
 		IdleAnim.BREATHE:
 			_idle_tween = create_tween().set_loops()
@@ -699,13 +1084,31 @@ func _restart_idle() -> void:
 			_idle_tween = create_tween().set_loops()
 			_idle_tween.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
 			_idle_tween.tween_method(_set_orbit_t, 0.0, 1.0, ORBIT_PERIOD)
+	if color_mode != ColorMode.GRADIENT:
+		return
+	match gradient_anim:
+		GradientAnim.EVOLVE:
+			_gradient_tween = create_tween().set_loops()
+			_gradient_tween.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+			_gradient_tween.tween_method(_set_gradient_t, 0.0, 1.0, GRADIENT_EVOLVE_PERIOD)
+		GradientAnim.CHASE:
+			# An active alpha comet already owns the shared orbit phase.
+			if idle_anim != IdleAnim.CHASE:
+				_gradient_tween = create_tween().set_loops()
+				_gradient_tween.set_trans(Tween.TRANS_LINEAR).set_ease(Tween.EASE_IN_OUT)
+				_gradient_tween.tween_method(_set_orbit_t, 0.0, 1.0, ORBIT_PERIOD)
 
 func _stop_idle() -> void:
 	if _idle_tween and _idle_tween.is_valid():
 		_idle_tween.kill()
 		_idle_tween = null
+	if _gradient_tween and _gradient_tween.is_valid():
+		_gradient_tween.kill()
+		_gradient_tween = null
 	if _ring_item.is_valid():
 		RenderingServer.canvas_item_set_modulate(_ring_item, Color.WHITE)
+	if _neon_item.is_valid():
+		RenderingServer.canvas_item_set_modulate(_neon_item, Color.WHITE)
 	if _ring_style:
 		_apply_style()
 
@@ -722,19 +1125,37 @@ func resume_idle_animation() -> void:
 func _set_ring_alpha(alpha: float) -> void:
 	if _ring_item.is_valid():
 		RenderingServer.canvas_item_set_modulate(_ring_item, Color(1.0, 1.0, 1.0, alpha))
+	if _neon_item.is_valid():
+		RenderingServer.canvas_item_set_modulate(_neon_item, Color(1.0, 1.0, 1.0, alpha))
 
 var _orbit_last_redraw_ms: int = 0
-## The idle comet re-tessellates the whole ring on each tween tick; ~30Hz is
-## visually indistinguishable and halves the per-frame PackedArray churn.
-const ORBIT_REDRAW_INTERVAL_MS: int = 33
+var _gradient_last_update_ms: int = 0
+## Direct-drawn paths still re-tessellate on tween ticks; ~30Hz is visually
+## indistinguishable and bounds PackedArray churn. Shader-only gradient motion
+## updates uniforms in place and leaves the existing draw geometry untouched.
+const ANIMATION_UPDATE_INTERVAL_MS: int = 33
 
 func _set_orbit_t(t: float) -> void:
 	_orbit_t = t
 	var now := Time.get_ticks_msec()
-	if now - _orbit_last_redraw_ms < ORBIT_REDRAW_INTERVAL_MS:
+	if now - _orbit_last_redraw_ms < ANIMATION_UPDATE_INTERVAL_MS:
 		return
 	_orbit_last_redraw_ms = now
-	_redraw_ring()
+	if idle_anim == IdleAnim.CHASE or _ring_shape == Shape.CORNERS:
+		_redraw_ring()
+	elif color_mode == ColorMode.GRADIENT and gradient_anim == GradientAnim.CHASE:
+		_update_gradient_material()
+
+func _set_gradient_t(t: float) -> void:
+	_gradient_t = t
+	var now := Time.get_ticks_msec()
+	if now - _gradient_last_update_ms < ANIMATION_UPDATE_INTERVAL_MS:
+		return
+	_gradient_last_update_ms = now
+	if _ring_shape == Shape.CORNERS:
+		_redraw_ring()
+	else:
+		_update_gradient_material()
 
 # ============================================================================
 # Config

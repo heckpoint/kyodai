@@ -20,6 +20,29 @@ signal game_changed(game: GameResource)
 		_update_texture_pin_state()
 		_update_display()
 
+## Optional FocusSubManager protocol: expose the already-extracted cover triad
+## without coupling the global focus renderer to GameCard or reprocessing art.
+func m3_get_focus_palette() -> Dictionary:
+	if game == null:
+		return {}
+	return {
+		"source_id": game.cover_url,
+		"primary": game.cover_primary_color,
+		"secondary": game.cover_secondary_color,
+		"tertiary": game.cover_tertiary_color,
+	}
+
+func m3_refresh_focus_palette(cover_url: String) -> void:
+	if game == null or game.cover_url != cover_url:
+		return
+	var updated_game: GameResource = DataManager.get_game_by_id(game.romm_id)
+	if updated_game == null:
+		return
+	game.cover_primary_color = updated_game.cover_primary_color
+	game.cover_secondary_color = updated_game.cover_secondary_color
+	game.cover_tertiary_color = updated_game.cover_tertiary_color
+	game.cover_colors_version = updated_game.cover_colors_version
+
 func set_game_with_priority(value: GameResource, high_priority: bool):
 	if game == value:
 		return

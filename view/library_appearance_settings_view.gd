@@ -6,10 +6,16 @@ extends Control
 const FOCUS_RING_SETTING_NAMES: Array[String] = [
 	"library_focus_scale",
 	"library_focus_movement_anim",
+	"library_focus_ring_color_mode",
+	"library_focus_palette",
+	"library_focus_source",
+	"library_focus_gradient_anim",
 	"library_focus_idle_anim",
 	"library_focus_ring_thickness",
 	"library_focus_ring_shape",
 	"library_focus_ring_outset",
+	"library_focus_ring_neon_glow",
+	"library_focus_ring_glow_intensity",
 ]
 
 var _library_general_menu: SettingsMenu = null

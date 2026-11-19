@@ -24,12 +24,12 @@ transform effect
 	- resolver: android - melonds private path, uneditable/readable pref file
 
 ## general UI
+	accent color follows game?
 	widgets (snap to screen regions? snap to grid?)
 		- game title, etc
 	focus color (glow, mirror)
 	x "case wrap" card effect (spine + label, maybe varying by platform?)
 	3d case effect
-	m3 master color sync with game/platform?
 	panels/layouts/draggable ui elements? (split containers?)
 	color presets (platform/game/custom)
 	'controls/info bar'

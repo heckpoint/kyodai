@@ -95,11 +95,19 @@ func _enter_tree() -> void:
 	# instance.
 	if not RenderingServer.frame_pre_draw.is_connected(_on_frame_pre_draw):
 		RenderingServer.frame_pre_draw.connect(_on_frame_pre_draw)
+	# Ring-only setting changes do not invalidate grid geometry. Re-anchor the
+	# pill immediately when the focus manager reports one (especially outset).
+	var hub := FocusSubManager.get_instance()
+	if hub and not hub.config_changed.is_connected(_sync_focused_title_pill):
+		hub.config_changed.connect(_sync_focused_title_pill)
 
 func _exit_tree() -> void:
 	_hide_focused_title_pill()
 	if RenderingServer.frame_pre_draw.is_connected(_on_frame_pre_draw):
 		RenderingServer.frame_pre_draw.disconnect(_on_frame_pre_draw)
+	var hub := FocusSubManager.get_instance()
+	if hub and hub.config_changed.is_connected(_sync_focused_title_pill):
+		hub.config_changed.disconnect(_sync_focused_title_pill)
 
 ## Keep the top-level layer pinned to the viewport (called on resize and
 ## display-size changes so the layer never holds a stale viewport rect).
@@ -160,12 +168,15 @@ func _sync_focused_title_pill() -> void:
 	var x := media_rect.get_center().x - pill_size.x * 0.5
 	x = clampf(x, margin, maxf(margin, _focused_title_layer.size.x - pill_size.x - margin))
 	var tail_height := _focused_title_pill.get_tail_height()
+	var ring_outset := M3Units.dp(maxf(0.0, UIManager.focus.offset_dp) if UIManager and UIManager.focus else 0.0)
 	var tail_points_down := true
 	var tail_visible := true
-	var y := media_rect.position.y - pill_size.y - tail_height - gap
+	# Keep the bubble's tail outside the focus ring's outset as well as the
+	# media. The below-card fallback moves outward in the opposite direction.
+	var y := media_rect.position.y - pill_size.y - tail_height - gap - ring_outset
 	if y < margin:
 		tail_points_down = false
-		y = media_rect.end.y + gap + tail_height
+		y = media_rect.end.y + gap + tail_height + ring_outset
 		if y + pill_size.y > _focused_title_layer.size.y - margin:
 			# Very tall cards can lack external space on both sides. Keep the
 			# title readable as an overlay just inside the media's top edge.

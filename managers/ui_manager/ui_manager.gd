@@ -302,6 +302,18 @@ func initialize(
 	var focus_movement_setting = DataManager.get_setting("library_focus_movement_anim")
 	if focus_movement_setting and focus_movement_setting.value is int:
 		focus.movement_anim = focus_movement_setting.value
+	var focus_color_setting = DataManager.get_setting("library_focus_ring_color_mode")
+	if focus_color_setting and focus_color_setting.value is int:
+		focus.color_mode = FocusSubManager.ColorMode.GRADIENT if focus_color_setting.value == 1 else FocusSubManager.ColorMode.PRIMARY
+	var focus_palette_setting = DataManager.get_setting("library_focus_palette")
+	if focus_palette_setting and focus_palette_setting.value is int:
+		focus.palette_role = focus_palette_setting.value
+	var focus_source_setting = DataManager.get_setting("library_focus_source")
+	if focus_source_setting and focus_source_setting.value is int:
+		focus.gradient_source = focus_source_setting.value
+	var focus_gradient_setting = DataManager.get_setting("library_focus_gradient_anim")
+	if focus_gradient_setting and focus_gradient_setting.value is int:
+		focus.gradient_anim = focus_gradient_setting.value
 	var focus_idle_setting = DataManager.get_setting("library_focus_idle_anim")
 	if focus_idle_setting and focus_idle_setting.value is int:
 		focus.idle_anim = focus_idle_setting.value
@@ -314,6 +326,12 @@ func initialize(
 	var focus_outset_setting = DataManager.get_setting("library_focus_ring_outset")
 	if focus_outset_setting and (focus_outset_setting.value is float or focus_outset_setting.value is int):
 		focus.offset_dp = float(focus_outset_setting.value)
+	var focus_neon_setting = DataManager.get_setting("library_focus_ring_neon_glow")
+	if focus_neon_setting and focus_neon_setting.value is bool:
+		focus.neon_glow = focus_neon_setting.value
+	var focus_glow_setting = DataManager.get_setting("library_focus_ring_glow_intensity")
+	if focus_glow_setting and (focus_glow_setting.value is float or focus_glow_setting.value is int):
+		focus.glow_intensity = float(focus_glow_setting.value)
 
 	# Only walk the tree when a style-affecting setting actually changed the
 	# M3Theme state from the compiled defaults (see style_dirty above); nodes
@@ -971,6 +989,8 @@ func _on_setting_changed(_value: Variant, setting: SettingsVar) -> void:
 				if not theme._preset_in_progress:
 					EffectThemeAdapter.on_dark_mode_changed(_value)
 			theme._apply_dark_mode(_value)
+			if focus:
+				focus.refresh()
 		"frosted_look":
 			if _value is bool:
 				M3Theme.frosted_look = _value
@@ -987,6 +1007,18 @@ func _on_setting_changed(_value: Variant, setting: SettingsVar) -> void:
 		"library_focus_movement_anim":
 			if focus and _value is int:
 				focus.movement_anim = _value
+		"library_focus_ring_color_mode":
+			if focus and _value is int:
+				focus.color_mode = FocusSubManager.ColorMode.GRADIENT if _value == 1 else FocusSubManager.ColorMode.PRIMARY
+		"library_focus_palette":
+			if focus and _value is int:
+				focus.palette_role = _value
+		"library_focus_source":
+			if focus and _value is int:
+				focus.gradient_source = _value
+		"library_focus_gradient_anim":
+			if focus and _value is int:
+				focus.gradient_anim = _value
 		"library_focus_idle_anim":
 			if focus and _value is int:
 				focus.idle_anim = _value
@@ -999,6 +1031,12 @@ func _on_setting_changed(_value: Variant, setting: SettingsVar) -> void:
 		"library_focus_ring_outset":
 			if focus and (_value is float or _value is int):
 				focus.offset_dp = float(_value)
+		"library_focus_ring_neon_glow":
+			if focus and _value is bool:
+				focus.neon_glow = _value
+		"library_focus_ring_glow_intensity":
+			if focus and (_value is float or _value is int):
+				focus.glow_intensity = float(_value)
 		# Card/grid specific settings (layout_mode, grid_vertical, card_zoom,
 		# grid_padding, focus_scale, display_mode, content_alignment, media_ratio,
 		# show_title_mode, card_effect_config, focus_lock) are owned by

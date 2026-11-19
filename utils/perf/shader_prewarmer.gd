@@ -77,6 +77,7 @@ const BAKED_SHADER_PATHS: Array[String] = [
 	"res://shaders/card/present_wrap.gdshader",
 	"res://shaders/card/shine.gdshader",
 	"res://shaders/card/stroke.gdshader",
+	"res://shaders/focus_ring_neon.gdshader",
 	"res://shaders/frosted_backdrop.gdshader",
 	"res://shaders/skeleton_shimmer.gdshader",
 ]
