@@ -280,9 +280,6 @@ var _scroll_axis_lines: int:
 ## Push the zoom model's inputs. Cheap (key compare short-circuits); called
 ## at the top of every zoom facade so stale caches are impossible.
 func _sync_zoom_model_inputs() -> void:
-	# Startup setup and zoom queries can run before deferred work. Never let
-	# them resolve stops against the compiled Fill/Standard cache defaults.
-	_refresh_cached_settings()
 	_zoom_model.resolution_enabled = not startup_layout_suppressed
 	_zoom_model.configure(int(view_mode), vertical, grid_separation, _get_base_dimensions_for_mode())
 	_zoom_model.set_available_size(_get_available_size() if _has_valid_available_size() else Vector2.ZERO)
@@ -723,10 +720,6 @@ func _capture_scroll_anchor(focus_index: int, allow_end_pin: bool = false) -> Gr
 	return anchor
 
 func _ready():
-	# UIManager synchronizes CardSettingsState before creating any views, so the
-	# saved media/display settings are already safe to read here. Hydrate before
-	# setup, zoom, or pool creation can consume the Fill/Standard defaults.
-	_refresh_cached_settings()
 	_setup_ui()
 
 	# frame_pre_draw (visual stamping) is owned by _visual_sync (connects in
@@ -741,9 +734,11 @@ func _ready():
 		resized.connect(_on_resized)
 		_setup_internal_resize_debounce()
 
-	# Load initial grid separation and focus scale from settings.
+	# Load initial grid separation and focus scale from settings
+	# Use call_deferred to ensure DataManager is fully initialized
 	call_deferred("_update_grid_separation_from_settings")
 	call_deferred("_update_focus_scale_from_settings")
+	call_deferred("_refresh_cached_settings")
 	_focus.connect_viewport.call_deferred()
 	_ready_called = true
 
@@ -1017,6 +1012,14 @@ func _refresh_cached_settings() -> void:
 	# of sync with the persisted setting (double-click menu bug).
 	pagination_enabled = state.pagination_enabled
 	staggered = state.grid_staggered
+
+	# Initialize last-layout tracking on the first cache so the first real
+	# layout doesn't treat the initial state as a "change" and re-snap the
+	# saved zoom to a different stop.
+	if _last_layout_display_mode < 0:
+		_last_layout_display_mode = _cached_card_display_mode
+	if _last_layout_media_aspect_ratio < 0:
+		_last_layout_media_aspect_ratio = state.media_aspect_ratio
 
 var _last_resized_size: Vector2 = Vector2.ZERO
 var _last_viewport_arg_size: Vector2 = Vector2.ZERO
@@ -1802,10 +1805,7 @@ func _recalculate_layout():
 	if restored_scroll >= 0.0:
 		_write_scroll_during_recalc(restored_scroll)
 
-	# LIST/CAROUSEL cell dimensions can remain identical when only the media
-	# ratio or effective display mode changes. Reapply those inputs to existing
-	# cards even when the outer cell itself needs no geometry update.
-	var update_card_geometry = card_geometry_changed or structure_changed or display_or_ratio_changed
+	var update_card_geometry = card_geometry_changed or structure_changed
 	var update_focus = focus_changed
 
 	for card in _active_cards:
@@ -2061,6 +2061,11 @@ func refresh_dimensions() -> void:
 
 func setup(card_scene_resource: PackedScene, total_items: int, initial_target_ratio: float = -1.0):
 	_card_scene = card_scene_resource
+	# Capabilities belong to the card scene, not the pool's lifetime. A cold-boot
+	# count can populate cards after layout is unsuppressed but before Main's
+	# deferred pool build, so probe before ANY card creation/configuration path.
+	if _card_scene:
+		_apply_capability_flags(GridCardPool.probe_capabilities(_card_scene))
 	_source_total_items = total_items
 	_total_items = _pad_total_items(total_items)
 
@@ -2121,9 +2126,6 @@ func _instantiate_card_pool():
 		sync_count = mini(_pool.max_pool_size, _last_computed_visible_count)
 	_pool.instantiate_seed(sync_count, _has_valid_available_size())
 
-	# Cache card capability flags from the probe so we can skip has_method() /
-	# string lookups in hot loops (probed once per card scene across all grids).
-	_apply_capability_flags(GridCardPool.probe_capabilities(_card_scene))
 	if debug_mode:
 		if DEBUG_LOG: print("[Grid] _instantiate_card_pool: pool_size=", _pool.max_pool_size, " elapsed_us=", Time.get_ticks_usec() - start_us)
 

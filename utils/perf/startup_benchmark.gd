@@ -25,7 +25,6 @@ static func run_from_args(host: Node) -> bool:
 			if arg.begins_with("--benchmark-startup-delay="):
 				delay_sec = arg.split("=")[1].to_float()
 		print("[Main] --benchmark-startup: startup complete, shutdown in ", delay_sec, "s")
-		dump_grid_debug_state()
 		if delay_sec > 0.0:
 			# --benchmark-staggered-at=<sec>: enable staggered AFTER startup has
 			# settled (mirrors a live menu toggle); bare --benchmark-staggered
@@ -123,11 +122,3 @@ static func dump_grid_debug_state() -> void:
 		var tag := "SP" if (c.has_meta("page_spacer") or c.has_meta("stagger_spacer")) else str(c.get_meta("virtual_index", -1))
 		xs.append("%s@(%d,%d)" % [tag, int(c.position.x), int(c.position.y)])
 	print("[GridDump] first children=", xs)
-	var state = UIManager.card_settings_state if UIManager else null
-	if state:
-		print("[GridDump] settings mode=", state.layout_mode, " display=", state.display_mode, " effective_display=", state.get_effective_display_mode(), " focused_only=", state.text_focused_only, " ratio_setting=", state.media_aspect_ratio, " cached_ratio=", grid._cached_media_aspect_ratio, " cached_display=", grid._cached_card_display_mode)
-	for i in range(mini(4, grid._active_cards.size())):
-		var card = grid._active_cards[i]
-		print("[CardDump] idx=", card.get_meta("virtual_index", -1), " game=", card.game.title if card.game else "<none>", " ratio=", card.media_aspect_ratio, " min=", card.custom_minimum_size, " size=", card.size, " content=", card._get_content_size(), " media=", card._media_bounds, " container=", card._media_container.bounds if card._media_container else Rect2(), " text_margin=", card.show_text_margin, " content_scale=", card.content_scale, " ready=", card.is_node_ready(), " needs_setup=", card.has_meta("needs_visual_setup"))
-		var base_effect = card._media_stack.get_effect("base") if card._media_stack else null
-		print("[CardDrawDump] idx=", card.get_meta("virtual_index", -1), " base_rect=", base_effect._last_offset_rect if base_effect else Rect2(), " last_refreshed=", card._last_refreshed_media_bounds, " layout_sig=", card._media_layout_sig)
