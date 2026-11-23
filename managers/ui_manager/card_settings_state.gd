@@ -15,7 +15,7 @@ enum ChangeMask {
 	MEDIA_SHAPE = 8,  ## media_aspect_ratio
 	THEME = 16,       ## dark_mode, primary_color
 	NAVIGATION = 32,  ## focus_centering_mode (scroll behavior only, no layout recalc)
-	TEXT = 64,        ## platform visibility, text alignment, focused-only text, marquee
+	TEXT = 64,        ## platform visibility, text alignment, focused-only text
 }
 
 # ---------------------------------------------------------------------------
@@ -41,7 +41,6 @@ var show_title_mode: int = 0
 var show_platform: bool = true
 ## 0 = follow content_alignment, 1 = left, 2 = center, 3 = right.
 var text_alignment: int = 0
-var scroll_truncation: bool = false
 var text_focused_only: bool = false
 var card_effect_config: Dictionary = {}
 var dark_mode: bool = true
@@ -177,13 +176,6 @@ func set_text_alignment(value: int) -> bool:
 	_mark(ChangeMask.TEXT)
 	return true
 
-func set_scroll_truncation(value: bool) -> bool:
-	if scroll_truncation == value:
-		return false
-	scroll_truncation = value
-	_mark(ChangeMask.TEXT)
-	return true
-
 func set_text_focused_only(value: bool) -> bool:
 	if text_focused_only == value:
 		return false
@@ -282,7 +274,6 @@ func sync_from_settings_manager() -> int:
 	set_show_title_mode(_get_int_setting("library_show_title_mode", 0))
 	set_show_platform(_get_bool_setting("library_card_show_platform", true))
 	set_text_alignment(_get_int_setting("library_card_text_alignment", 0))
-	set_scroll_truncation(_get_bool_setting("library_card_scroll_truncation", false))
 	set_text_focused_only(_get_bool_setting("library_card_text_focused_only", false))
 	set_card_effect_config(_get_dict_setting("card_effect_config", {}))
 	set_dark_mode(_get_bool_setting("dark_mode", true))
@@ -325,8 +316,6 @@ func apply_setting(property_name: String, value: Variant) -> int:
 			return ChangeMask.TEXT if set_show_platform(_coerce_bool(value, true)) else ChangeMask.NONE
 		"library_card_text_alignment":
 			return ChangeMask.TEXT if set_text_alignment(_coerce_int(value, 0)) else ChangeMask.NONE
-		"library_card_scroll_truncation":
-			return ChangeMask.TEXT if set_scroll_truncation(_coerce_bool(value, false)) else ChangeMask.NONE
 		"library_card_text_focused_only":
 			return (ChangeMask.DISPLAY | ChangeMask.TEXT) if set_text_focused_only(_coerce_bool(value, false)) else ChangeMask.NONE
 		"card_effect_config":

@@ -686,11 +686,10 @@ func _on_more_button_pressed() -> void:
 	align_submenu.add_check_item("Right / Bottom", content_alignment == 2, func(): _set_content_alignment(2))
 	menu.add_submenu_item("Content Alignment", align_submenu, "format-align-center")
 
-	# Text Settings submenu. Visibility and marquee options are independent;
+	# Text Settings submenu. Visibility and Focused Only are independent;
 	# alignment choices share one persisted, mutually exclusive value.
 	var show_platform := true
 	var text_alignment := 0
-	var scroll_truncation := false
 	var text_focused_only := false
 	if DataManager:
 		var platform_setting = DataManager.get_setting("library_card_show_platform")
@@ -699,9 +698,6 @@ func _on_more_button_pressed() -> void:
 		var text_align_setting = DataManager.get_setting("library_card_text_alignment")
 		if text_align_setting and text_align_setting.value is int:
 			text_alignment = text_align_setting.value
-		var scroll_setting = DataManager.get_setting("library_card_scroll_truncation")
-		if scroll_setting and scroll_setting.value is bool:
-			scroll_truncation = scroll_setting.value
 		var focused_setting = DataManager.get_setting("library_card_text_focused_only")
 		if focused_setting and focused_setting.value is bool:
 			text_focused_only = focused_setting.value
@@ -722,7 +718,6 @@ func _on_more_button_pressed() -> void:
 	text_settings.add_check_item("Center", effective_text_alignment == 2, func(): _set_card_text_alignment(2))
 	text_settings.add_check_item("Right", effective_text_alignment == 3, func(): _set_card_text_alignment(3))
 	text_settings.add_separator()
-	text_settings.add_check_item("Scroll Truncation", scroll_truncation, _toggle_card_scroll_truncation)
 	text_settings.add_check_item("Focused Only", text_focused_only, _toggle_card_text_focused_only)
 	menu.add_submenu_item("Text Settings", text_settings, "format-text")
 
@@ -759,9 +754,6 @@ func _set_card_text_alignment(alignment: int) -> void:
 
 func _toggle_card_show_platform() -> void:
 	_toggle_card_text_bool("library_card_show_platform", true)
-
-func _toggle_card_scroll_truncation() -> void:
-	_toggle_card_text_bool("library_card_scroll_truncation", false)
 
 func _toggle_card_text_focused_only() -> void:
 	_toggle_card_text_bool("library_card_text_focused_only", false)

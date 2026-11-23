@@ -49,6 +49,11 @@ var _base_rect: ColorRect = null
 var _layers: Array = []
 
 func _ready():
+	# Keep the entire background composition below card content even when its
+	# children use positive draw indices. Child Z values remain relative to this
+	# root, preserving the configured effect order without crossing into cards.
+	z_as_relative = false
+	z_index = OverlayLayers.LIBRARY_BACKGROUND_Z
 	_initialize_background()
 	resized.connect(_on_resized)
 

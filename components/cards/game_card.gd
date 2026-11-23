@@ -615,13 +615,11 @@ func _is_focused_only_enabled() -> bool:
 func _apply_text_settings() -> void:
 	var show_platform := true
 	var alignment := 0
-	var scroll_truncation := false
 	var focused_only := _is_focused_only_enabled()
 	var state = UIManager.card_settings_state if UIManager else null
 	if state:
 		show_platform = state.show_platform
 		alignment = state.text_alignment
-		scroll_truncation = state.scroll_truncation
 	elif DataManager:
 		var platform_setting = DataManager.get_setting("library_card_show_platform")
 		if platform_setting and platform_setting.value is bool:
@@ -629,15 +627,12 @@ func _apply_text_settings() -> void:
 		var alignment_setting = DataManager.get_setting("library_card_text_alignment")
 		if alignment_setting and alignment_setting.value is int:
 			alignment = alignment_setting.value
-		var scroll_setting = DataManager.get_setting("library_card_scroll_truncation")
-		if scroll_setting and scroll_setting.value is bool:
-			scroll_truncation = scroll_setting.value
 
 	var focused := preview_show_focus if preview_mode else _is_focused
 	text_alignment = clampi(alignment, 0, 3) as M3Card.TextAlignment
 	supporting_text_visible = show_platform
 	# In Focused Only the title lives in the grid-owned pill, never inline.
-	scroll_truncated_text = scroll_truncation and not focused_only
+	scroll_truncated_text = not focused_only
 	text_content_visible = not focused_only
 	text_focused = focused and not focused_only
 

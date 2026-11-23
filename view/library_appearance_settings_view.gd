@@ -13,7 +13,6 @@ const FOCUS_RING_SETTING_NAMES: Array[String] = [
 	"library_focus_idle_anim",
 	"library_focus_ring_thickness",
 	"library_focus_ring_shape",
-	"library_focus_ring_outset",
 	"library_focus_ring_neon_glow",
 	"library_focus_ring_glow_intensity",
 ]

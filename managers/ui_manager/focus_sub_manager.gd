@@ -88,7 +88,7 @@ var stroke_width_dp: float = 3.0:
 		_on_config_changed()
 
 ## Outset between the control's reported rect and the ring.
-var offset_dp: float = 2.0:
+var offset_dp: float = 6.0:
 	set(value):
 		offset_dp = value
 		_on_config_changed()
@@ -552,7 +552,7 @@ func _update_ring_parent(control: Control) -> void:
 	else:
 		RenderingServer.canvas_item_set_parent(_ring_item, _canvas)
 		RenderingServer.canvas_item_set_parent(_neon_item, _canvas)
-		RenderingServer.canvas_item_set_draw_index(_ring_item, 0)
+		RenderingServer.canvas_item_set_draw_index(_ring_item, 1)
 		RenderingServer.canvas_item_set_draw_index(_neon_item, 0)
 
 func _update_ring_draw_index(control: Control) -> void:
@@ -561,7 +561,8 @@ func _update_ring_draw_index(control: Control) -> void:
 	var draw_index := DEFAULT_GRID_DRAW_INDEX
 	if control.has_method("m3_get_focus_draw_index"):
 		draw_index = control.m3_get_focus_draw_index()
-	RenderingServer.canvas_item_set_draw_index(_ring_item, draw_index)
+	# The normally blended core belongs after the additive halo.
+	RenderingServer.canvas_item_set_draw_index(_ring_item, draw_index + 1)
 	if _neon_item.is_valid():
 		RenderingServer.canvas_item_set_draw_index(_neon_item, draw_index)
 
@@ -727,7 +728,7 @@ func _redraw_ring() -> void:
 		Shape.PILL:
 			radius = minf(rect.size.x, rect.size.y) * 0.5
 			if use_shader:
-				_draw_neon_ring(rect, radius, base_color)
+				_draw_neon_full(rect, radius, base_color)
 			else:
 				_ring_style.set_corner_radius_all(int(radius))
 				_ring_style.draw(_ring_item, rect)
@@ -736,22 +737,55 @@ func _redraw_ring() -> void:
 			var square := Rect2(rect.get_center() - Vector2(side, side) * 0.5, Vector2(side, side))
 			radius = side * 0.5
 			if use_shader:
-				_draw_neon_ring(square, radius, base_color)
+				_draw_neon_full(square, radius, base_color)
 			else:
 				_ring_style.set_corner_radius_all(int(radius))
 				_ring_style.draw(_ring_item, square)
 		Shape.CORNERS:
-			_draw_corners(rect, radius)
+			if use_shader:
+				_draw_neon_corners(rect, radius, base_color)
+				# Keep the core's hue intact on light backgrounds; only the
+				# underlying halo uses additive blending.
+				_draw_corners(rect, radius)
+			else:
+				_draw_corners(rect, radius)
 		_:
 			if use_shader:
-				_draw_neon_ring(rect, radius, base_color)
+				_draw_neon_full(rect, radius, base_color)
 			else:
 				_ring_style.set_corner_radius_all(int(radius))
 				_ring_style.draw(_ring_item, rect)
 	if orbiting:
 		_draw_orbit_comet(rect, radius)
 
-func _draw_neon_ring(rect: Rect2, radius: float, color: Color) -> void:
+func _draw_neon_full(rect: Rect2, radius: float, color: Color) -> void:
+	# Solid cores use normal alpha blending so light themes do not wash their
+	# accent to white. Gradient cores retain the single-pass shader treatment.
+	var separate_core := neon_glow and color_mode != ColorMode.GRADIENT
+	_draw_neon_ring(rect, radius, color, false, 0.0, PI * 0.5, separate_core)
+	if separate_core:
+		_ring_style.set_corner_radius_all(int(radius))
+		_ring_style.draw(_ring_item, rect)
+
+func _draw_neon_corners(rect: Rect2, radius: float, color: Color) -> void:
+	# Match the polyline fallback's centerline geometry. The shader derives a
+	# true distance field around each arc and tick, including rounded end caps.
+	var width := M3Units.dp(stroke_width_dp)
+	if width <= 0.0:
+		return
+	var r := Rect2(rect.position + Vector2.ONE * width * 0.5, rect.size - Vector2.ONE * width)
+	if r.size.x <= 0.0 or r.size.y <= 0.0:
+		return
+	radius = minf(radius, minf(r.size.x, r.size.y) * 0.5)
+	var straight_w := maxf(0.0, r.size.x - 2.0 * radius)
+	var straight_h := maxf(0.0, r.size.y - 2.0 * radius)
+	var tick := minf(M3Units.dp(corner_tick_dp), minf(straight_w, straight_h) * 0.5)
+	var sweep := PI * 0.5
+	if tick < 1.0:
+		sweep *= 0.7
+	_draw_neon_ring(r, radius, color, true, tick, sweep, true)
+
+func _draw_neon_ring(rect: Rect2, radius: float, color: Color, corners: bool = false, tick: float = 0.0, sweep: float = PI * 0.5, halo_only: bool = false) -> void:
 	if not _neon_item.is_valid() or _neon_material == null or _neon_texture == null:
 		return
 	# Match the shader's 3x feathered glow range. Keep enough room for the core
@@ -768,6 +802,10 @@ func _draw_neon_ring(rect: Rect2, radius: float, color: Color) -> void:
 	_neon_material.set_shader_parameter("stroke_width", stroke_width)
 	_neon_material.set_shader_parameter("glow_width", glow_width)
 	_neon_material.set_shader_parameter("glow_strength", glow_intensity if neon_glow else 0.0)
+	_neon_material.set_shader_parameter("core_strength", 0.0 if halo_only else 1.0)
+	_neon_material.set_shader_parameter("corner_mode", corners)
+	_neon_material.set_shader_parameter("corner_tick", tick)
+	_neon_material.set_shader_parameter("corner_sweep", sweep)
 	_update_gradient_material()
 	RenderingServer.canvas_item_add_texture_rect(
 		_neon_item,
@@ -923,7 +961,9 @@ func _draw_orbit_comet(rect: Rect2, radius: float) -> void:
 	if width <= 0.0:
 		return
 	var gradient_enabled := color_mode == ColorMode.GRADIENT
-	var palette: Array[Color] = _current_gradient_palette() if gradient_enabled else []
+	var palette: Array[Color] = []
+	if gradient_enabled:
+		palette = _current_gradient_palette()
 	var points := PackedVector2Array()
 	var colors := PackedColorArray()
 	points.resize(ORBIT_POINTS)
@@ -985,7 +1025,9 @@ func _draw_corners(rect: Rect2, radius: float) -> void:
 	const SEGMENTS_MAX := 48
 	var segments := clampi(int(ceil(radius * sweep / SEGMENT_TARGET_PX)), SEGMENTS_MIN, SEGMENTS_MAX)
 	var gradient_enabled := color_mode == ColorMode.GRADIENT
-	var palette: Array[Color] = _current_gradient_palette() if gradient_enabled else []
+	var palette: Array[Color] = []
+	if gradient_enabled:
+		palette = _current_gradient_palette()
 	for c in corners:
 		var center: Vector2 = c[0]
 		# Center the (possibly shrunk) sweep on the corner bisector.
@@ -1007,14 +1049,6 @@ func _draw_corners(rect: Rect2, radius: float) -> void:
 				color = _sample_gradient(palette, _gradient_spatial_t(perimeter_t))
 				color.a = colors[0].a
 			point_colors.append(color)
-		if neon_glow and glow_intensity > 0.0:
-			var halo_width := width + M3Units.dp(NEON_GLOW_STROKE_EXTRA_DP)
-			var halo_colors := PackedColorArray(point_colors)
-			for i in range(halo_colors.size()):
-				halo_colors[i].a *= glow_intensity * 0.65
-			RenderingServer.canvas_item_add_polyline(_ring_item, points, halo_colors, halo_width, true)
-			RenderingServer.canvas_item_add_circle(_ring_item, points[0], halo_width * 0.5, halo_colors[0])
-			RenderingServer.canvas_item_add_circle(_ring_item, points[points.size() - 1], halo_width * 0.5, halo_colors[halo_colors.size() - 1])
 		RenderingServer.canvas_item_add_polyline(_ring_item, points, point_colors, width, true)
 		# Polylines have butt caps; stamp circles on the tips for pill ends.
 		RenderingServer.canvas_item_add_circle(_ring_item, points[0], width * 0.5, point_colors[0])

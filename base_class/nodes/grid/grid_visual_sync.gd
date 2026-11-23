@@ -58,7 +58,11 @@ func _ready() -> void:
 		layer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		layer.clip_contents = false
-		layer.z_index = -1
+		# Background effects occupy a lower stack and navigation a higher one.
+		# This absolute layer keeps card art between them across theme rebuilds
+		# and navigation reparents, without clipping intentional focus overflow.
+		layer.z_as_relative = false
+		layer.z_index = OverlayLayers.GRID_MEDIA_Z
 		layer.top_level = true
 		# The layer MUST be a child of the grid (a CanvasItem), not of this
 		# module (a plain Node): engine visibility propagation only recurses
@@ -162,7 +166,8 @@ func _sync_focused_title_pill() -> void:
 	# Width is based on the unscaled media so it does not breathe with the
 	# focus tween; the anchor rect below does include the current focus scale.
 	var max_width := minf(maxf(M3Units.dp(32.0), card._media_bounds.size.x), viewport_max)
-	_focused_title_pill.configure(title, max_width, state.text_alignment, state.scroll_truncation)
+	# Truncated titles always scroll, including the Focused Only bubble.
+	_focused_title_pill.configure(title, max_width, state.text_alignment, true)
 
 	var pill_size := _focused_title_pill.custom_minimum_size
 	var x := media_rect.get_center().x - pill_size.x * 0.5

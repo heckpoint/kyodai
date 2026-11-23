@@ -37,6 +37,8 @@ const LAUNCH_TITLE_Z := 1001
 const KEYBOARD_Z := 4096
 
 # z_index within the root layout
+const LIBRARY_BACKGROUND_Z := -100
+const GRID_MEDIA_Z := -1
 const TOOLBAR_Z := 10
 
 ## True while a mouse event lands on the window-chrome strip (the custom title

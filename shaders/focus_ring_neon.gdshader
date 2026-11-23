@@ -13,6 +13,10 @@ uniform float corner_radius = 12.0;
 uniform float stroke_width = 3.0;
 uniform float glow_width = 8.0;
 uniform float glow_strength = 0.6;
+uniform float core_strength = 1.0;
+uniform bool corner_mode = false;
+uniform float corner_tick = 0.0;
+uniform float corner_sweep = 1.5707963;
 uniform bool gradient_enabled = false;
 uniform float gradient_phase = 0.0;
 uniform int gradient_color_count = 5;
@@ -29,6 +33,65 @@ uniform vec4 gradient_color_8 : source_color = vec4(0.10, 0.90, 1.00, 1.0);
 float rounded_box_sdf(vec2 point, vec2 half_size, float radius) {
 	vec2 q = abs(point) - half_size + vec2(radius);
 	return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius;
+}
+
+float segment_distance(vec2 point, vec2 a, vec2 b) {
+	vec2 pa = point - a;
+	vec2 ba = b - a;
+	float t = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+	return length(pa - ba * t);
+}
+
+// Distance to one corner's arc and its two straight ticks. Clamping the
+// angular coordinate includes the arc endpoint caps in the same distance
+// field, so the glow feathers around caps instead of being clipped by a mask.
+float corner_piece_distance(
+	vec2 point,
+	vec2 center,
+	float radius,
+	float base_angle,
+	float sweep,
+	float tick,
+	vec2 tick_dir_0,
+	vec2 tick_dir_1
+) {
+	float center_angle = base_angle + PI * 0.25;
+	float half_sweep = sweep * 0.5;
+	float a0 = center_angle - half_sweep;
+	float a1 = center_angle + half_sweep;
+	vec2 p0 = center + vec2(cos(a0), sin(a0)) * radius;
+	vec2 p1 = center + vec2(cos(a1), sin(a1)) * radius;
+
+	vec2 relative = point - center;
+	float angle = atan(relative.y, relative.x);
+	float delta = atan(sin(angle - center_angle), cos(angle - center_angle));
+	float arc_angle = center_angle + clamp(delta, -half_sweep, half_sweep);
+	vec2 closest_arc = center + vec2(cos(arc_angle), sin(arc_angle)) * radius;
+	float distance = length(point - closest_arc);
+	distance = min(distance, segment_distance(point, p0, p0 + tick_dir_0 * tick));
+	distance = min(distance, segment_distance(point, p1, p1 + tick_dir_1 * tick));
+	return distance;
+}
+
+float corner_path_distance(vec2 point, vec2 half_size, float radius) {
+	vec2 corner = half_size - vec2(radius);
+	float distance = corner_piece_distance(
+		point, vec2(-corner.x, -corner.y), radius, PI,
+		corner_sweep, corner_tick, vec2(0.0, 1.0), vec2(1.0, 0.0)
+	);
+	distance = min(distance, corner_piece_distance(
+		point, vec2(corner.x, -corner.y), radius, PI * 1.5,
+		corner_sweep, corner_tick, vec2(-1.0, 0.0), vec2(0.0, 1.0)
+	));
+	distance = min(distance, corner_piece_distance(
+		point, corner, radius, 0.0,
+		corner_sweep, corner_tick, vec2(0.0, -1.0), vec2(-1.0, 0.0)
+	));
+	distance = min(distance, corner_piece_distance(
+		point, vec2(-corner.x, corner.y), radius, PI * 0.5,
+		corner_sweep, corner_tick, vec2(1.0, 0.0), vec2(0.0, -1.0)
+	));
+	return distance;
 }
 
 // Inverse perimeter mapping matching FocusSubManager._perimeter_point(): start
@@ -111,16 +174,18 @@ void fragment() {
 	vec2 point = (UV - vec2(0.5)) * quad_size;
 	vec2 half_size = border_size * 0.5;
 	float radius = min(corner_radius, min(half_size.x, half_size.y));
-	float distance_to_border = rounded_box_sdf(point, half_size, radius);
+	float distance_to_border = corner_mode
+		? corner_path_distance(point, half_size, radius)
+		: abs(rounded_box_sdf(point, half_size, radius));
 	// Cover the complete pixel footprint around the core. Narrower coverage
 	// leaves visible stair-stepping on small rounded corners.
 	float aa = max(fwidth(distance_to_border), 1.0);
-	float core = 1.0 - smoothstep(
+	float core = (1.0 - smoothstep(
 		max(stroke_width * 0.5 - aa, 0.0),
 		stroke_width * 0.5 + aa,
-		abs(distance_to_border)
-	);
-	float glow_distance = abs(distance_to_border);
+		distance_to_border
+	)) * core_strength;
+	float glow_distance = distance_to_border;
 	float falloff_width = max(glow_width, 0.001);
 	float halo = exp(-glow_distance / falloff_width);
 	// Preserve the large, soft tail. Feather it fully to zero before the draw

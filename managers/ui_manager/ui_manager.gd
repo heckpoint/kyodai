@@ -323,9 +323,6 @@ func initialize(
 	var focus_shape_setting = DataManager.get_setting("library_focus_ring_shape")
 	if focus_shape_setting and focus_shape_setting.value is int:
 		_apply_focus_ring_shape(focus_shape_setting.value)
-	var focus_outset_setting = DataManager.get_setting("library_focus_ring_outset")
-	if focus_outset_setting and (focus_outset_setting.value is float or focus_outset_setting.value is int):
-		focus.offset_dp = float(focus_outset_setting.value)
 	var focus_neon_setting = DataManager.get_setting("library_focus_ring_neon_glow")
 	if focus_neon_setting and focus_neon_setting.value is bool:
 		focus.neon_glow = focus_neon_setting.value
@@ -1028,9 +1025,6 @@ func _on_setting_changed(_value: Variant, setting: SettingsVar) -> void:
 		"library_focus_ring_shape":
 			if focus and _value is int:
 				_apply_focus_ring_shape(_value)
-		"library_focus_ring_outset":
-			if focus and (_value is float or _value is int):
-				focus.offset_dp = float(_value)
 		"library_focus_ring_neon_glow":
 			if focus and _value is bool:
 				focus.neon_glow = _value
