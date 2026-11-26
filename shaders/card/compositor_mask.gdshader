@@ -1,5 +1,5 @@
 shader_type canvas_item;
-render_mode unshaded;
+render_mode unshaded, blend_premul_alpha;
 
 #include "res://shaders/card/includes/card_common.gdshaderinc"
 
@@ -14,9 +14,10 @@ void fragment() {
 	float coverage = 1.0 - smoothstep(-aa_width, 0.0, dist);
 
 	vec4 contents = textureLod(screen_texture, SCREEN_UV, 0.0);
-	if (contents.a > 0.0001) {
-		contents.rgb /= contents.a;
-	}
 	vec4 modulate = COLOR;
-	COLOR = vec4(contents.rgb * modulate.rgb, contents.a * coverage * modulate.a);
+	// The group texture is already premultiplied. Preserve that representation
+	// through the final coverage/modulation pass, including emissive RGB whose
+	// alpha is zero (for example glass specular highlights).
+	float output_weight = coverage * modulate.a;
+	COLOR = vec4(contents.rgb * modulate.rgb * output_weight, contents.a * output_weight);
 }

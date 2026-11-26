@@ -9,6 +9,11 @@ extends ColorRect
 ## and stretch it back up — for GPU-heavy effects that are soft by design.
 var render_scale: float = 1.0
 
+## Scaled transparent viewports must be composited with premultiplied alpha
+## when their shader outputs premultiplied RGB. This prevents bilinear upscaling
+## from creating dark fringes where coverage approaches zero.
+var output_premultiplied_alpha: bool = false
+
 var _settings: Dictionary = {}
 
 ## Mirror of EffectBase.is_theme_adaptive(): whether EffectThemeAdapter

@@ -5,6 +5,7 @@ extends BackgroundEffect
 # the host upscale. Initialized here so the host sees it before _ready().
 func _init():
 	render_scale = 0.5
+	output_premultiplied_alpha = true
 
 func _ready():
 	super._ready()
@@ -26,26 +27,35 @@ func _apply_settings() -> void:
 	_set_shader_param("icon_scale", _settings.get("icon_scale", 0.7))
 	_set_shader_param("orbit_speed", _settings.get("orbit_speed", 0.15))
 	_set_shader_param("num_icons", _settings.get("num_icons", 21))
+	_set_shader_param("icon_opacity", _settings.get("icon_opacity", 0.6))
+	_set_shader_param("icon_color", _settings.get("icon_color", Color.WHITE))
 	
 	# Light direction as normalized vec3
-	var light_dir = _settings.get("light_direction", Vector3(1.0, 1.0, 0.0))
+	var light_dir = _settings.get("light_direction", Vector3(-0.65, 0.8, -0.75))
 	_set_shader_param("light_direction", light_dir.normalized())
 	
 	# 3D Extrusion & Raymarching Settings
 	_set_shader_param("extrusion_depth", _settings.get("extrusion_depth", 0.03))
 	_set_shader_param("max_ray_steps", _settings.get("max_ray_steps", 16))
 	_set_shader_param("ray_step_size", _settings.get("ray_step_size", 0.002))
-	_set_shader_param("alpha_threshold", _settings.get("alpha_threshold", 0.9))
+	_set_shader_param("alpha_threshold", _settings.get("alpha_threshold", 0.3))
 	_set_shader_param("edge_softness", _settings.get("edge_softness", 1.0))
 	
 	# Blur Settings
-	_set_shader_param("blur_amount", _settings.get("blur_amount", 0.004))
+	_set_shader_param("blur_amount", _settings.get("blur_amount", 0.012))
 	_set_shader_param("blur_kernel_size", _settings.get("blur_kernel_size", 6))
+	_set_shader_param("highlight_lift", _settings.get("highlight_lift", 0.06))
 	
 	# Lighting Settings
-	_set_shader_param("light_ambient", _settings.get("light_ambient", 0.85))
-	_set_shader_param("light_diffuse", _settings.get("light_diffuse", 0.275))
+	_set_shader_param("light_ambient", _settings.get("light_ambient", 0.62))
+	_set_shader_param("light_diffuse", _settings.get("light_diffuse", 0.36))
 	_set_shader_param("front_face_brightness", _settings.get("front_face_brightness", 1.0))
+	_set_shader_param("specular_strength", _settings.get("specular_strength", 0.35))
+	_set_shader_param("specular_shininess", _settings.get("specular_shininess", 40.0))
+	_set_shader_param("overexposure_strength", _settings.get("overexposure_strength", 0.95))
+	_set_shader_param("overexposure_threshold", _settings.get("overexposure_threshold", 0.06))
+	_set_shader_param("split_light_strength", _settings.get("split_light_strength", 0.22))
+	_set_shader_param("bevel_strength", _settings.get("bevel_strength", 0.75))
 	
 	# Anti-aliasing
 	_set_shader_param("supersample_level", _settings.get("supersample_level", 2))
@@ -63,9 +73,17 @@ func get_settings_schema() -> Array[SettingsVar]:
 	orbit_radius_var.property_name = "orbit_radius"
 	schema.append(orbit_radius_var)
 	
-	var icon_scale_var = SettingsVar.new(Type.FLOAT, 0.4, State.ENABLED, "Icon Scale", "Size of controller icons", 0.1, 1.0, 0.05)
+	var icon_scale_var = SettingsVar.new(Type.FLOAT, 0.4, State.ENABLED, "Icon Scale", "Size of controller icons", 0.1, 1.5, 0.05)
 	icon_scale_var.property_name = "icon_scale"
 	schema.append(icon_scale_var)
+
+	var opacity_var = SettingsVar.new(Type.FLOAT, 0.6, State.ENABLED, "Icon Opacity", "Premultiplied icon opacity", 0.0, 1.0, 0.05)
+	opacity_var.property_name = "icon_opacity"
+	schema.append(opacity_var)
+
+	var color_var = SettingsVar.new(Type.COLOR, Color.WHITE, State.ENABLED, "Icon Color", "Albedo tint applied before lighting; opacity remains independent")
+	color_var.property_name = "icon_color"
+	schema.append(color_var)
 	
 	var orbit_speed_var = SettingsVar.new(Type.FLOAT, 0.15, State.ENABLED, "Orbit Speed", "How fast icons orbit", 0.05, 1.0, 0.05)
 	orbit_speed_var.property_name = "orbit_speed"

@@ -1,57 +1,58 @@
 [gd_resource type="Resource" script_class="ThemePreset" format=3]
 
-[ext_resource type="Script" path="res://base_class/abstract/theme_preset.gd" id="1_icu0t"]
+[ext_resource type="Script" path="res://base_class/abstract/theme_preset.gd" id="1_3bdin"]
 
-[sub_resource type="Gradient" id="Gradient_basebg"]
+[sub_resource type="Gradient" id="Gradient_v8755"]
+colors = PackedColorArray(0, 0, 0, 0.13725491, 0, 0, 0, 0.13725491)
+
+[sub_resource type="Gradient" id="Gradient_y3yyf"]
 colors = PackedColorArray(0.042000007, 0.07738499, 0.52163994, 1, 0.042000007, 0.28139997, 0.84, 1)
 
-[sub_resource type="Gradient" id="Gradient_rgwmd"]
-colors = PackedColorArray(0, 0, 0, 0.14901961, 0, 0, 0, 0.14901961)
-
 [resource]
-script = ExtResource("1_icu0t")
+script = ExtResource("1_3bdin")
 name = "LiveArea"
-description = ""
-created_at = "2026-05-31T18:41:43"
-version = 4
+created_at = "2026-11-26T00:57:44"
 values = {
 "card_effect_config": {
 "card_orientation": 2,
 "card_rounding": 1.0,
 "effects": [{
-"layer_id": "live_glass",
-"effect_id": "glass",
-"settings": {
-"bounce_intensity": 0.38,
-"bounce_softness": 2.5,
-"glass_color": Color(0.5411765, 0.4745098, 0.44705883, 0.07450981),
-"light_angle": 299.0,
-"light_height": 0.46,
-"rim_intensity": 1.16,
-"rim_sharpness": 4.6,
-"specular_intensity": 0.63,
-"specular_power": 50.0,
-"swoop_curve": 0.27,
-"swoop_height": 0.42,
-"swoop_intensity": 0.0,
-"swoop_tilt": -0.01
-}
-}, {
-"layer_id": "live_fade_stroke",
-"effect_id": "stroke",
-"settings": {
-"stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_rgwmd"),
-"stroke_width_ratio": 0.33,
-"fade_in": true,
-"advance": true
-}
-}, {
-"layer_id": "live_distort",
 "effect_id": "distort",
+"layer_id": "live_distort",
 "settings": {
 "distortion": 0.05,
 "opacity": 1.0
+}
+}, {
+"effect_id": "stroke",
+"layer_id": "948f90d9-5d73-4b3d-8f4d-d57a9a738d2a",
+"settings": {
+"advance": false,
+"depth_offset_ratio": -0.5,
+"fade_in": true,
+"gradient_angle": 180.0,
+"gradient_radial": false,
+"stroke_color": Color(0, 0, 0, 1),
+"stroke_gradient": SubResource("Gradient_v8755"),
+"stroke_width_ratio": 0.123
+}
+}, {
+"effect_id": "glass",
+"layer_id": "live_glass",
+"settings": {
+"bounce_intensity": 0.24,
+"bounce_softness": 8.0,
+"glass_color": Color(0.5411765, 0.4745098, 0.44705883, 0.07450981),
+"light_angle": 240.0,
+"light_height": 0.31000000000000005,
+"rim_intensity": 1.23,
+"rim_sharpness": 7.1,
+"specular_intensity": 0.69,
+"specular_power": 128.0,
+"swoop_curve": 0.0,
+"swoop_height": 0.0,
+"swoop_intensity": 0.0,
+"swoop_tilt": -1.0
 }
 }],
 "focus_effects": [],
@@ -60,11 +61,16 @@ values = {
 "card_media_aspect_ratio": 3,
 "dark_mode": true,
 "frosted_look": true,
+"hero_effect_config": {
+"corner_radius": 0.06,
+"effects": [],
+"hero_height": 0
+},
 "library_background_config": {
 "effects": [{
 "effect_id": "gradient",
 "settings": {
-"background_gradient": SubResource("Gradient_basebg"),
+"background_gradient": SubResource("Gradient_y3yyf"),
 "gradient_angle": 180.0,
 "gradient_radial": false
 }
@@ -79,34 +85,34 @@ values = {
 "wave_thickness": 0.6,
 "wave_vertical_offset": -0.75
 }
-}],
-"overlays": []
+}]
 },
 "library_card_content_alignment": 1,
 "library_card_display_mode": 1,
 "library_card_show_platform": true,
 "library_card_text_alignment": 0,
 "library_card_text_focused_only": false,
-"library_card_zoom": 0.28931554957493205,
-"library_card_zoom_level": -1,
+"library_card_zoom": 0.30878625646666974,
+"library_card_zoom_level": 1,
+"library_card_zoom_list": 0.25,
 "library_focus_centering": 0,
-"library_focus_gradient_anim": 0,
+"library_focus_gradient_anim": 1,
 "library_focus_idle_anim": 0,
 "library_focus_movement_anim": 2,
-"library_focus_palette": 0,
-"library_focus_ring_color_mode": 0,
-"library_focus_ring_glow_intensity": 0.6,
+"library_focus_palette": 3,
+"library_focus_ring_color_mode": 1,
+"library_focus_ring_glow_intensity": 0.25,
 "library_focus_ring_neon_glow": true,
 "library_focus_ring_shape": 0,
 "library_focus_ring_thickness": 3.0,
 "library_focus_scale": 0.03,
-"library_focus_source": 1,
+"library_focus_source": 0,
 "library_grid_padding": 40,
 "library_grid_staggered": true,
 "library_grid_vertical": true,
 "library_layout_mode": 0,
 "library_navigation_type": 0,
 "library_pagination_view": false,
-"library_primary_color": Color(0.14117648, 0.38431373, 0.9490196, 1),
+"library_primary_color": Color(0.95, 0.95, 0.95, 1),
 "library_show_title_mode": 0
 }

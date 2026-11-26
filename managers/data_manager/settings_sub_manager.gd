@@ -198,6 +198,13 @@ func _refresh_setting_metadata(_settings: Settings) -> void:
 		saved_var.options = default_var.options.duplicate()
 		saved_var.encrypted = default_var.encrypted
 		saved_var.include_in_preset = default_var.include_in_preset
+		# Visibility rules are code-owned, unlike user-facing values. Remove stale
+		# rules and refresh current ones; otherwise a removed controlling setting
+		# can leave its dependent row permanently hidden after an upgrade.
+		if default_var.metadata.has("visible_if"):
+			saved_var.metadata["visible_if"] = default_var.metadata["visible_if"].duplicate(true)
+		else:
+			saved_var.metadata.erase("visible_if")
 		# Pick up metadata keys added since the settings were saved (saved
 		# keys win, so stale serialized metadata can't clobber user state).
 		for key in default_var.metadata:

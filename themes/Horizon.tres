@@ -2,16 +2,10 @@
 
 [ext_resource type="Script" path="res://base_class/abstract/theme_preset.gd" id="1_o6xfr"]
 
-[sub_resource type="Gradient" id="Gradient_ww3ry"]
-colors = PackedColorArray(0.114811346, 0.12034921, 0.12586436, 1, 0.114811346, 0.12034921, 0.12586436, 1)
-
-[sub_resource type="Gradient" id="Gradient_rgwmd"]
-colors = PackedColorArray(0.9254902, 0.93333334, 0.9411765, 1, 0.9254902, 0.93333334, 0.9411765, 1)
-
 [resource]
 script = ExtResource("1_o6xfr")
 name = "Horizon"
-created_at = "2026-08-18T19:15:47"
+created_at = "2026-11-21T01:35:15"
 values = {
 "card_effect_config": {
 "card_orientation": 2,
@@ -29,41 +23,28 @@ values = {
 "hero_height": 0
 },
 "library_background_config": {
-"effects": [{
-"effect_id": "gradient",
-"light_settings": {
-"background_gradient": SubResource("Gradient_rgwmd"),
-"gradient_angle": 90.0,
-"gradient_radial": false
-},
-"settings": {
-"background_gradient": SubResource("Gradient_ww3ry"),
-"gradient_angle": 90.0,
-"gradient_radial": false
-}
-}],
-"overlays": []
+"effects": []
 },
 "library_card_content_alignment": 1,
 "library_card_display_mode": 1,
 "library_card_show_platform": true,
 "library_card_text_alignment": 0,
-"library_card_text_focused_only": false,
-"library_card_zoom": 0.25,
-"library_card_zoom_level": -1,
-"library_card_zoom_list": 0.25,
+"library_card_text_focused_only": true,
+"library_card_zoom": 0.2290326303615139,
+"library_card_zoom_level": 3,
+"library_card_zoom_list": 0.22908921933085505,
 "library_focus_centering": 0,
-"library_focus_gradient_anim": 0,
+"library_focus_gradient_anim": 1,
 "library_focus_idle_anim": 1,
 "library_focus_movement_anim": 2,
-"library_focus_palette": 0,
-"library_focus_ring_color_mode": 0,
-"library_focus_ring_glow_intensity": 0.6,
+"library_focus_palette": 6,
+"library_focus_ring_color_mode": 1,
+"library_focus_ring_glow_intensity": 0.25,
 "library_focus_ring_neon_glow": true,
 "library_focus_ring_shape": 0,
-"library_focus_ring_thickness": 2.5,
+"library_focus_ring_thickness": 3.5,
 "library_focus_scale": 0.01,
-"library_focus_source": 1,
+"library_focus_source": 2,
 "library_grid_padding": 30,
 "library_grid_staggered": false,
 "library_grid_vertical": true,

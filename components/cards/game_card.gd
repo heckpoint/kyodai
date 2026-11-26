@@ -157,6 +157,8 @@ func _kill_focus_tweens() -> void:
 # Cover/media loading is delegated to CardMediaLoader so GameCard stays focused
 # on card behavior (focus, input, badges) rather than download/cache logic.
 var _media_loader: CardMediaLoader = null
+var _base_decode_bucket: int = 0
+const TRANSFORM_DECODE_OVERSAMPLE_CAP := 2.0
 
 var _badge_update_pending: bool = false
 
@@ -288,7 +290,9 @@ func _ready():
 	mouse_entered.connect(_on_card_mouse_entered)
 
 func _has_media_content() -> bool:
-	return _media_stack != null
+	# Grid placeholders need media geometry even though they deliberately have
+	# no effect stack. Real cards still use the stack as their media signal.
+	return _media_stack != null or _is_placeholder
 
 func _exit_tree():
 	# Cancel any in-flight image operations to prevent callbacks from keeping this card alive
@@ -327,8 +331,54 @@ func set_image_priority(high_priority: bool) -> void:
 ## Called by the grid's layout pass so live card.size is never a decode basis
 ## and zoom/resize can't mint duplicate (path, bucket) cache entries.
 func set_assigned_decode_bucket(bucket: int) -> void:
-	if _media_loader:
-		_media_loader.set_assigned_decode_bucket(bucket)
+	_base_decode_bucket = bucket
+	_sync_transform_decode_bucket()
+
+func _effective_transform_scale() -> float:
+	# Compose every Transform affecting the base image. A linked focus override
+	# replaces its target's static scale so the larger variant is ready before
+	# the focus tween starts.
+	var layer_scales: Dictionary = {}
+	if _media_container:
+		for i in range(_media_container.effect_settings.size()):
+			var entry = _media_container.effect_settings[i]
+			if not entry is Dictionary or entry.get("effect_id", "") != "transform":
+				continue
+			var layer_id := str(entry.get("layer_id", "__index_%d" % i))
+			layer_scales[layer_id] = maxf(0.01, float(entry.get("settings", {}).get("scale", 1.0)))
+		for entry in _media_container.focus_effect_settings:
+			if not entry is Dictionary or entry.get("effect_id", "") != "transform":
+				continue
+			var target_id := str(entry.get("target_layer_id", ""))
+			if layer_scales.has(target_id):
+				layer_scales[target_id] = maxf(0.01, float(entry.get("settings", {}).get("scale", 1.0)))
+
+	var effective_scale := 1.0
+	for scale in layer_scales.values():
+		effective_scale *= float(scale)
+	return clampf(effective_scale, 1.0, TRANSFORM_DECODE_OVERSAMPLE_CAP)
+
+func _sync_transform_decode_bucket() -> void:
+	if not _media_loader:
+		return
+	var previous_size := _media_loader._decode_size()
+	var desired_bucket := _base_decode_bucket
+	var transform_scale := _effective_transform_scale()
+	if transform_scale > 1.001:
+		var base_bucket := _base_decode_bucket
+		if base_bucket <= 0:
+			if size.x > 0.0 and size.y > 0.0:
+				base_bucket = CardMediaLoader.decode_bucket_for_card_size(size, CardMediaLoader.current_dpr())
+			else:
+				base_bucket = CardMediaLoader.MAX_COVER_TEXTURE_SIZE
+		desired_bucket = CardMediaLoader.decode_bucket_for_size(base_bucket * transform_scale)
+
+	_media_loader.set_assigned_decode_bucket(desired_bucket)
+	if previous_size == desired_bucket:
+		return
+	_update_texture_pin_state()
+	if game and _current_texture_game_id == game.id:
+		_load_cover(false)
 
 func _update_texture_pin_state() -> void:
 	var desired_key := ""
@@ -362,6 +412,16 @@ func _setup_preview_mode():
 	_show_focus_effects(preview_show_focus)
 
 func _build_media_stack():
+	if _is_placeholder:
+		# Placeholder visibility is a lifecycle invariant, not a one-time setter
+		# side effect. Theme refreshes and RS recreation must never revive effects.
+		if _media_stack:
+			_media_stack.set_visible(false)
+		if _focus_stack:
+			_focus_stack.set_visible(false)
+		if _present_wrap:
+			_present_wrap.set_visible(false)
+		return
 	if not _media_container:
 		return
 	var effect_settings := []
@@ -696,6 +756,7 @@ func _update_card_state_from_settings():
 		if _is_focused_only_enabled():
 			_display_mode = 2
 
+	_sync_transform_decode_bucket()
 	_apply_display_mode()
 	_apply_text_settings()
 	_sync_focus_container_properties()

@@ -12,6 +12,12 @@ func _setup_shader() -> void:
 	var mat = _material as ShaderMaterial
 	mat.shader = preload("res://shaders/card/distort.gdshader")
 
+func set_z_index(value: int) -> void:
+	# Match Glass's behind-media swoop: the automatic base art uses z=0, so a
+	# behind-art distortion renders at z=-1 and only shows through transparency.
+	var behind_art: bool = _settings.get("distort_behind_media", false)
+	super.set_z_index(-1 if behind_art else value)
+
 func _update_shader_params() -> void:
 	if not media_container:
 		return
@@ -44,5 +50,9 @@ func get_settings_schema() -> Array[SettingsVar]:
 	var opacity_var = SettingsVar.new(Type.FLOAT, 1.0, State.ENABLED, "Opacity", "", 0.0, 1.0, 0.01)
 	opacity_var.property_name = "opacity"
 	schema.append(opacity_var)
+
+	var behind_art_var = SettingsVar.new(Type.BOOL, false, State.ENABLED, "Behind Art", "Render behind the cover art so distortion only shows through transparent media and inset areas")
+	behind_art_var.property_name = "distort_behind_media"
+	schema.append(behind_art_var)
 
 	return schema

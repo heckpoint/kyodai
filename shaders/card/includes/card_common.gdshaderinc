@@ -14,6 +14,29 @@ uniform float wrap_inset_left_pixels = 0.0;
 uniform vec2 uv_transform_scale = vec2(1.0, 1.0);
 uniform vec2 uv_transform_offset = vec2(0.0, 0.0);
 
+// Optional source-image transform. These affect texture sampling only; card
+// shape, overlays, and compositor geometry remain in their original space.
+uniform vec2 source_transform_x = vec2(1.0, 0.0);
+uniform vec2 source_transform_y = vec2(0.0, 1.0);
+uniform vec2 source_transform_origin = vec2(0.0);
+uniform int source_transform_active = 0;
+
+vec2 source_transform_pixel(vec2 pixel_pos) {
+	vec2 local = pixel_pos - source_transform_origin;
+	float determinant = source_transform_x.x * source_transform_y.y - source_transform_y.x * source_transform_x.y;
+	if (abs(determinant) < 0.000001) {
+		return pixel_pos;
+	}
+	return vec2(
+		(source_transform_y.y * local.x - source_transform_y.x * local.y) / determinant,
+		(-source_transform_x.y * local.x + source_transform_x.x * local.y) / determinant
+	);
+}
+
+vec2 source_transform_uv(vec2 uv) {
+	return source_transform_pixel(uv * card_size) / max(card_size, vec2(0.0001));
+}
+
 // Edge AA mode: 0 = hard discard (Standard), 1 = smoothstep AA (Transparent/Media Only)
 uniform int display_mode = 0;
 

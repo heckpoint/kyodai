@@ -12,9 +12,6 @@ uniform float shadow_spread : hint_range(0.0, 1.0) = 0.0;
 uniform float shadow_expand : hint_range(0.0, 0.5) = 0.02; // ratio of card width
 uniform float effect_alpha : hint_range(0.0, 1.0) = 1.0;
 
-// Anti-aliasing width in pixels (1.0 is usually enough)
-const float aa_width = 1.5;
-
 void fragment() {
 	// The texture is larger than the card (includes margin for shadow)
 	vec2 total_size = card_size + shadow_margin * 2.0;
@@ -46,12 +43,7 @@ void fragment() {
 		shadow_alpha = clamp((shadow_alpha - shadow_spread) / max(1e-4, 1.0 - shadow_spread), 0.0, 1.0);
 	}
 	
-	// Mask out the card area itself (only show shadow outside)
-	float card_edge_dist = rounded_rect_sdf_pixels(local_pos + card_half, card_size, corner_radius);
-	float card_alpha = 1.0 - smoothstep(-aa_width, 0.0, card_edge_dist);
-	
-	// Shadow only appears outside the card
-	shadow_alpha *= (1.0 - card_alpha);
-	
+	// Keep interior shadow coverage. Opaque art will hide it naturally, while
+	// transparent media/glass regions can reveal it just like the background.
 	COLOR = vec4(shadow_color.rgb, shadow_color.a * shadow_alpha * effect_alpha) * COLOR;
 }

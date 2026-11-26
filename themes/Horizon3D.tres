@@ -2,144 +2,108 @@
 
 [ext_resource type="Script" path="res://base_class/abstract/theme_preset.gd" id="1_u30fp"]
 
-[sub_resource type="Gradient" id="Gradient_vktvg"]
-colors = PackedColorArray(0.8745098, 0.85882354, 0.84313726, 1, 0.8745098, 0.85882354, 0.84313726, 1)
+[sub_resource type="Gradient" id="Gradient_i7u2m"]
+offsets = PackedFloat32Array(0, 0.3312369, 0.82080925, 0.9706499)
+colors = PackedColorArray(0.9764706, 0.9764706, 0.9764706, 1, 0.9686945, 0.9686945, 0.9686945, 1, 0.92, 0.92, 0.92, 1, 0.83, 0.83, 0.83, 1)
 
-[sub_resource type="Gradient" id="Gradient_rgwmd"]
-offsets = PackedFloat32Array(0, 0.3312369, 0.7358491, 0.9350105, 0.9706499)
-colors = PackedColorArray(0.9764706, 0.9764706, 0.9764706, 1, 0.9686945, 0.9686945, 0.9686945, 1, 0.88235295, 0.88235295, 0.88235295, 1, 0.77, 0.77, 0.77, 1, 0.83, 0.83, 0.83, 1)
+[sub_resource type="Gradient" id="Gradient_1eg2d"]
+offsets = PackedFloat32Array(0, 0.3676391, 0.82080925, 0.9706499)
+colors = PackedColorArray(0.18, 0.18, 0.18, 1, 0.18, 0.18, 0.18, 1, 0.1173573, 0.11735728, 0.11735721, 1, 0.14, 0.14, 0.14, 1)
 
-[sub_resource type="Gradient" id="Gradient_5arxv"]
-colors = PackedColorArray(1, 1, 1, 1, 1, 1, 1, 1)
-
-[sub_resource type="Gradient" id="Gradient_hjtwh"]
-offsets = PackedFloat32Array(0, 0.8825996)
-colors = PackedColorArray(0.9607843, 0.9607843, 0.9607843, 1, 0.57254905, 0.57254905, 0.57254905, 1)
+[sub_resource type="Gradient" id="Gradient_im147"]
+offsets = PackedFloat32Array(0.124864526, 1)
+colors = PackedColorArray(0.9137255, 0.9137255, 0.93333334, 1, 0.83137256, 0.8235294, 0.87058824, 1)
 
 [resource]
 script = ExtResource("1_u30fp")
 name = "Horizon3D"
-description = ""
-created_at = "2026-05-31T23:35:10"
-version = 4
+created_at = "2026-11-26T00:56:53"
 values = {
 "card_effect_config": {
 "card_orientation": 2,
-"card_rounding": 0.38,
+"card_rounding": 0.27,
 "effects": [{
-"layer_id": "horizon_main_stroke",
-"effect_id": "stroke",
-"settings": {
-"stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_rgwmd"),
-"stroke_width_ratio": 0.14,
-"gradient_angle": 180.0,
-"advance": true
-}
-}, {
-"layer_id": "horizon_outer_detail",
-"effect_id": "stroke",
-"settings": {
-"stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_hjtwh"),
-"stroke_width_ratio": 0.013,
-"gradient_angle": 180.0,
-"depth_offset_ratio": -0.14,
-"advance": false
-}
-}, {
-"layer_id": "horizon_inner_stroke",
-"effect_id": "stroke",
-"settings": {
-"stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_5arxv"),
-"stroke_width_ratio": 0.055,
-"gradient_angle": 180.0,
-"advance": false
-}
-}, {
-"layer_id": "horizon_shadow",
 "effect_id": "drop_shadow",
+"layer_id": "horizon_shadow",
 "settings": {
-"shadow_color": Color(0, 0, 0, 0.19607843),
-"shadow_expand": 0.073,
+"shadow_color": Color(0, 0, 0, 0.18431373),
+"shadow_expand": 0.049,
 "shadow_offset_x": 0.0,
-"shadow_offset_y": 0.04999999999999999,
-"shadow_softness": 0.15,
-"shadow_spread": 0.0
+"shadow_offset_y": 0.044999999999999984,
+"shadow_softness": 0.126,
+"shadow_spread": 0.09
+}
+}, {
+"dark_settings": {
+"advance": true,
+"gradient_angle": 180.0,
+"stroke_color": Color(0.13149944, 0.13149941, 0.13149934, 1),
+"stroke_gradient": SubResource("Gradient_1eg2d"),
+"stroke_width_ratio": 0.064
+},
+"effect_id": "stroke",
+"layer_id": "horizon_main_stroke",
+"settings": {
+"advance": true,
+"gradient_angle": 180.0,
+"stroke_color": Color(1, 1, 1, 1),
+"stroke_gradient": SubResource("Gradient_i7u2m"),
+"stroke_width_ratio": 0.064
 }
 }],
 "focus_effects": [{
-"layer_id": "horizon_focus_main_stroke",
 "effect_id": "stroke",
-"target_layer_id": "horizon_main_stroke",
+"layer_id": "5ef5232f-c217-4af0-a1d0-fe17efe0bea1",
 "settings": {
-"stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_rgwmd"),
-"stroke_width_ratio": 0.09,
+"advance": true,
 "gradient_angle": 180.0,
-"advance": true
-}
-}, {
-"layer_id": "horizon_focus_outer_detail",
-"effect_id": "stroke",
-"target_layer_id": "horizon_outer_detail",
-"settings": {
 "stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_hjtwh"),
-"stroke_width_ratio": 0.013,
-"gradient_angle": 180.0,
-"depth_offset_ratio": -0.09,
-"advance": false
-}
-}, {
-"layer_id": "horizon_focus_inner_stroke",
-"effect_id": "stroke",
-"target_layer_id": "horizon_inner_stroke",
-"settings": {
-"stroke_color": Color(1, 1, 1, 1),
-"stroke_gradient": SubResource("Gradient_5arxv"),
-"stroke_width_ratio": 0.01,
-"gradient_angle": 180.0,
-"advance": false
-}
+"stroke_gradient": SubResource("Gradient_i7u2m"),
+"stroke_width_ratio": 0.0
+},
+"target_layer_id": "horizon_main_stroke"
 }],
 "hero_height": 4
 },
 "card_media_aspect_ratio": 3,
 "dark_mode": false,
 "frosted_look": true,
+"hero_effect_config": {
+"corner_radius": 0.06,
+"effects": [],
+"hero_height": 0
+},
 "library_background_config": {
 "effects": [{
 "effect_id": "gradient",
 "settings": {
-"background_gradient": SubResource("Gradient_vktvg"),
-"gradient_angle": 90.0,
+"background_gradient": SubResource("Gradient_im147"),
+"gradient_angle": 105.0,
 "gradient_radial": false
 }
-}],
-"overlays": []
+}]
 },
 "library_card_content_alignment": 0,
 "library_card_display_mode": 2,
 "library_card_show_platform": true,
 "library_card_text_alignment": 0,
 "library_card_text_focused_only": false,
-"library_card_zoom": 0.3127674726820136,
-"library_card_zoom_level": -1,
+"library_card_zoom": 0.19490033659096978,
+"library_card_zoom_level": 1,
+"library_card_zoom_list": 0.25,
 "library_focus_centering": 0,
-"library_focus_gradient_anim": 0,
-"library_focus_idle_anim": 0,
+"library_focus_gradient_anim": 1,
+"library_focus_idle_anim": 1,
 "library_focus_movement_anim": 2,
-"library_focus_palette": 0,
-"library_focus_ring_color_mode": 0,
-"library_focus_ring_glow_intensity": 0.6,
+"library_focus_palette": 6,
+"library_focus_ring_color_mode": 1,
+"library_focus_ring_glow_intensity": 0.4,
 "library_focus_ring_neon_glow": true,
 "library_focus_ring_shape": 0,
-"library_focus_ring_thickness": 3.0,
+"library_focus_ring_thickness": 6.5,
 "library_focus_scale": 0.03,
-"library_focus_source": 1,
-"library_grid_padding": 14,
+"library_focus_source": 0,
+"library_grid_padding": 25,
 "library_grid_staggered": false,
 "library_grid_vertical": false,
 "library_layout_mode": 0,

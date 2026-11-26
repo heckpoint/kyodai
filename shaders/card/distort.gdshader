@@ -75,12 +75,17 @@ void fragment() {
 	// Get distorted/warped UVs
 	vec2 warped_uv = spherical_distort(zoomed_uv, distortion, card_size);
 	
-	// Apply precomputed UV transforms from MediaContainer so the distorted texture
-	// aligns with the base image's visible crop.
+	// Apply the optional source-image transform, then the precomputed cover
+	// transform from MediaContainer.
+	warped_uv = source_transform_uv(warped_uv);
 	warped_uv = warped_uv * uv_transform_scale + uv_transform_offset;
 	
-	// Sample the distorted texture
-	vec4 tex_color = texture(game_texture, warped_uv);
+	// Sample the distorted texture. Transformed empty regions remain transparent
+	// instead of clamping the source edge into the exposed media area.
+	vec4 tex_color = vec4(0.0);
+	if (source_transform_active == 0 || (warped_uv.x >= 0.0 && warped_uv.x <= 1.0 && warped_uv.y >= 0.0 && warped_uv.y <= 1.0)) {
+		tex_color = texture(game_texture, warped_uv);
+	}
 	
 	// Apply opacity and effect alpha
 	tex_color.a *= opacity * edge_alpha * effect_alpha;

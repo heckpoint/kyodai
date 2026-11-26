@@ -29,6 +29,7 @@ const EFFECT_REGISTRY: Dictionary = {
 	"glow": "res://effects/shared/glow_effect.gd",
 	"glass": "res://effects/shared/glass_effect.gd",
 	"distort": "res://effects/shared/distort_effect.gd",
+	"transform": "res://effects/shared/transform_effect.gd",
 	"gradient_overlay": "res://effects/shared/gradient_overlay_effect.gd",
 	"case_wrap": "res://effects/shared/case_wrap_effect.gd",
 	"hsl": "res://effects/shared/hsl_effect.gd",
@@ -106,6 +107,11 @@ func has_multiple_interior_layers() -> bool:
 
 func _is_exterior(effect: EffectBase) -> bool:
 	return effect.effect_id in ["glow", "drop_shadow"]
+
+func _is_media_transformable(effect: EffectBase) -> bool:
+	# Only source-image processors participate. Glass, strokes, badges, glows,
+	# and other overlays remain fixed at the card's original geometry.
+	return effect.effect_id in ["distort", "hsl", "blur"]
 
 func set_draw_index(idx: int) -> void:
 	_ensure_stack_canvas_item()
@@ -276,6 +282,8 @@ func _recompute_geometry() -> void:
 			depth += effect.get_inset_pixels(media_container.size)
 			wrap_top += effect.get_top_inset_pixels(media_container.size)
 			wrap_left += effect.get_left_inset_pixels(media_container.size)
+
+	_update_media_transforms()
 	# Keep a minimal valid aperture. Unlimited duplicate insets must not produce
 	# negative media sizes or NaNs in downstream crop/shader calculations.
 	var max_depth := maxf(0.0, minf(media_container.size.x, media_container.size.y) * 0.5 - 0.5)
@@ -285,6 +293,25 @@ func _recompute_geometry() -> void:
 	media_container.content_inset_pixels = depth
 	media_container.wrap_inset_top_ratio = wrap_top / maxf(media_container.size.y, 1.0)
 	media_container.wrap_inset_left_ratio = wrap_left / maxf(media_container.size.x, 1.0)
+
+func _update_media_transforms() -> void:
+	# A Transform applies to media below it, not to the stack/card container.
+	# Walk backward so layers above the current boundary keep their own space.
+	var transform_below := Transform2D.IDENTITY
+	for i in range(_layers.size() - 1, -1, -1):
+		var effect: EffectBase = _layers[i].get("effect")
+		if not effect:
+			continue
+		if effect is TransformEffect:
+			transform_below = transform_below * effect.get_transform(media_container.size)
+		elif _is_media_transformable(effect):
+			effect.set_content_transform(transform_below)
+		else:
+			effect.set_content_transform(Transform2D.IDENTITY)
+
+	if not _base_layer.is_empty():
+		var base_effect: EffectBase = _base_layer.get("effect")
+		base_effect.set_content_transform(transform_below)
 
 func _run_pipeline() -> void:
 	if not media_container:

@@ -58,7 +58,11 @@ void fragment() {
 		discard;
 	}
 	
-	vec2 tex_uv = inner_uv * uv_transform_scale + uv_transform_offset;
+	vec2 source_inner_uv = (source_transform_pixel(pixel_pos) - inner_offset) / inner_size;
+	if (source_transform_active == 1 && (source_inner_uv.x < 0.0 || source_inner_uv.x > 1.0 || source_inner_uv.y < 0.0 || source_inner_uv.y > 1.0)) {
+		discard;
+	}
+	vec2 tex_uv = source_inner_uv * uv_transform_scale + uv_transform_offset;
 	
 	vec2 tex_size = vec2(textureSize(game_texture, 0));
 	vec4 tex_color = sample_blur(tex_uv, tex_size);

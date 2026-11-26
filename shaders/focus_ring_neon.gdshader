@@ -1,7 +1,7 @@
 shader_type canvas_item;
-// Additive compositing prevents antialiased edge pixels from darkening the
-// card or background, which otherwise reads as a black fringe on corners.
-render_mode unshaded, blend_add;
+// Premultiplied emission keeps the colored core normally blended while the
+// zero-alpha halo remains additive without creating a gray fringe.
+render_mode unshaded, blend_premul_alpha;
 
 // Neon stroke around a rounded rectangle. Glow is a distance falloff from the
 // border, NOT a filled shadow silhouette, so card centers receive no tint.
@@ -192,13 +192,11 @@ void fragment() {
 	// quad boundary at 3x glow_width so the outer radius remains smooth.
 	float edge_fade = 1.0 - smoothstep(falloff_width * 1.5, falloff_width * 3.0, glow_distance);
 	halo *= edge_fade * glow_strength;
-	// Composite core over halo continuously. Using max(core, halo * (1-core))
-	// creates a dark crossover at the outside of the main band.
-	float coverage = core + (1.0 - core) * halo;
-	float alpha = coverage * neon_color.a;
-	// Do not threshold faint coverage into a hard contour. Only skip pixels
-	// whose smooth falloff has already reached exactly zero.
-	if (alpha <= 0.0) {
+	// Core alpha preserves destination coverage; halo RGB is emitted at zero
+	// alpha so it adds light without washing the colored core out.
+	float core_alpha = core * neon_color.a;
+	float halo_alpha = (1.0 - core) * halo * neon_color.a;
+	if (core_alpha <= 0.0 && halo_alpha <= 0.0) {
 		discard;
 	}
 	vec3 local_color = neon_color.rgb;
@@ -206,5 +204,5 @@ void fragment() {
 		float perimeter_t = rounded_box_perimeter_t(point, half_size, radius);
 		local_color = sample_gradient(perimeter_t - gradient_phase);
 	}
-	COLOR = vec4(local_color, alpha);
+	COLOR = vec4(local_color * (core_alpha + halo_alpha), core_alpha);
 }

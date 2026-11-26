@@ -94,10 +94,16 @@ void fragment() {
 
 		tex_color = vec4(mix(dynamic_base, loading_shimmer_color.rgb, wave), 1.0);
 	} else {
-		// Use the precomputed UV transform from MediaContainer. The transform maps
-		// inner media UV -> texture UV.
-		vec2 tex_uv = inner_uv * uv_transform_scale + uv_transform_offset;
-		tex_color = texture(game_texture, tex_uv);
+		// Transform only the source-image lookup. The media aperture and every
+		// overlay retain their original card-space geometry.
+		vec2 source_pixel = source_transform_pixel(pixel_pos);
+		vec2 source_inner_uv = (source_pixel - inner_offset) / inner_size;
+		if (source_transform_active == 1 && (source_inner_uv.x < 0.0 || source_inner_uv.x > 1.0 || source_inner_uv.y < 0.0 || source_inner_uv.y > 1.0)) {
+			tex_color = vec4(0.0);
+		} else {
+			vec2 tex_uv = source_inner_uv * uv_transform_scale + uv_transform_offset;
+			tex_color = texture(game_texture, tex_uv);
+		}
 	}
 	
 	// Combine outer edge alpha with inner inset alpha

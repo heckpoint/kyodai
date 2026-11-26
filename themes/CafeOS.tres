@@ -5,57 +5,64 @@
 [sub_resource type="Gradient" id="Gradient_3yjc8"]
 colors = PackedColorArray(0.97878, 0.99, 0.9702, 1, 0.97878, 0.99, 0.9702, 1)
 
-[sub_resource type="Gradient" id="Gradient_basebg"]
-colors = PackedColorArray(0.93652, 0.954, 0.94089, 1, 0.85652, 0.874, 0.86089, 1)
+[sub_resource type="Gradient" id="Gradient_f18ra"]
+offsets = PackedFloat32Array(0, 0.16527689, 0.332957, 1)
+colors = PackedColorArray(0.107317984, 0.12041121, 0.11072381, 1, 0.10445346, 0.13243876, 0.112057194, 1, 0.113702916, 0.12614462, 0.11692857, 1, 0.152, 0.16, 0.154, 1)
+
+[sub_resource type="Gradient" id="Gradient_xn7it"]
+offsets = PackedFloat32Array(0, 0.16527689, 0.332957, 1)
+colors = PackedColorArray(0.90160006, 0.92, 0.90620005, 1, 0.9312, 0.97, 0.9409, 1, 0.9357355, 0.95323616, 0.9401107, 1, 0.99, 1, 0.9925, 1)
 
 [resource]
 script = ExtResource("1_rp5om")
 name = "CafeOS"
-created_at = "2026-08-18T19:13:48"
+created_at = "2026-11-25T18:18:02"
 values = {
 "card_effect_config": {
 "card_orientation": 2,
-"card_rounding": 0.32,
+"card_rounding": 0.29,
 "effects": [{
-"layer_id": "cafe_shadow",
 "effect_id": "drop_shadow",
+"layer_id": "cafe_shadow",
 "settings": {
-"shadow_color": Color(0, 0, 0, 0.23529412),
-"shadow_expand": 0.012,
+"shadow_color": Color(0, 0, 0, 0.16470589),
+"shadow_expand": 0.073,
 "shadow_offset_x": -0.001,
-"shadow_offset_y": 0.05499999999999999,
-"shadow_softness": 0.15,
-"shadow_spread": 0.08
+"shadow_offset_y": 0.00199999999999998,
+"shadow_softness": 0.13,
+"shadow_spread": 0.15
 }
 }, {
-"layer_id": "cafe_stroke",
 "effect_id": "stroke",
+"layer_id": "cafe_stroke",
 "settings": {
+"advance": true,
+"gradient_angle": 90.0,
 "stroke_color": Color(1, 1, 1, 1),
 "stroke_gradient": SubResource("Gradient_3yjc8"),
-"stroke_width_ratio": 0.02,
-"gradient_angle": 90.0,
-"advance": true
+"stroke_width_ratio": 0.008
 }
 }, {
-"layer_id": "cafe_distort",
 "dark_settings": {
 "distortion": 0.87,
 "opacity": 0.05
 },
 "effect_id": "distort",
+"layer_id": "cafe_distort",
 "settings": {
-"distortion": 0.87,
-"opacity": 0.03
+"distort_behind_media": true,
+"distortion": 1.0,
+"opacity": 0.14
 }
 }, {
-"layer_id": "cafe_glass_inset",
 "effect_id": "inset",
+"layer_id": "cafe_glass_inset",
 "settings": {
-"inset_ratio": 0.05
+"inset_ratio": 0.06,
+"left_inset_ratio": 0.0,
+"top_inset_ratio": 0.0
 }
 }, {
-"layer_id": "cafe_glass",
 "dark_settings": {
 "bounce_intensity": 0.44,
 "bounce_softness": 7.4,
@@ -74,25 +81,54 @@ values = {
 "swoop_tilt": 0.01
 },
 "effect_id": "glass",
+"layer_id": "cafe_glass",
 "settings": {
-"bounce_intensity": 0.2,
-"bounce_softness": 7.4,
-"glass_color": Color(0.8117647, 0.8117647, 0.8117647, 0),
-"light_angle": 231.0,
+"bounce_intensity": 0.27,
+"bounce_softness": 8.0,
+"glass_color": Color(0.8117647, 0.8117647, 0.8117647, 0.039215688),
+"light_angle": 222.0,
 "light_height": -0.5,
-"rim_intensity": 0.99,
-"rim_sharpness": 5.6,
-"specular_intensity": 0.38,
+"rim_intensity": 1.63,
+"rim_sharpness": 8.3,
+"specular_intensity": 0.64,
 "specular_power": 128.0,
 "swoop_behind_media": true,
 "swoop_color": Color(0, 0.59, 0.2655, 1),
-"swoop_curve": 0.12,
-"swoop_height": 0.29,
-"swoop_intensity": 0.31,
-"swoop_tilt": 0.01
+"swoop_curve": 0.07,
+"swoop_height": 0.21,
+"swoop_intensity": 0.27,
+"swoop_tilt": 0.04000000000000003
+}
+}, {
+"effect_id": "transform",
+"layer_id": "5c58bf39-f712-4376-87ea-63bf999f1a5a",
+"settings": {
+"pan_x": 0.0,
+"pan_y": 0.0,
+"rotation": 0.0,
+"scale": 1.26
 }
 }],
-"focus_effects": [],
+"focus_effects": [{
+"effect_id": "inset",
+"layer_id": "8fbc9ae5-0252-4e40-a4c9-915c6afbc8fa",
+"settings": {
+"inset_ratio": 0.0,
+"left_inset_ratio": 0.0,
+"top_inset_ratio": 0.0
+},
+"target_layer_id": "cafe_glass_inset"
+}, {
+"effect_id": "transform",
+"layer_id": "5d556a9f-6f35-4a65-ac6e-45aff7d7de51",
+"settings": {
+"pan_x": 0.0,
+"pan_y": 0.0,
+"rotation": 0.0,
+"scale": 1.0
+},
+"target_layer_id": "5c58bf39-f712-4376-87ea-63bf999f1a5a"
+}],
 "hero_height": 4
 },
 "card_media_aspect_ratio": 3,
@@ -105,45 +141,57 @@ values = {
 },
 "library_background_config": {
 "effects": [{
+"dark_settings": {
+"background_gradient": SubResource("Gradient_f18ra"),
+"gradient_angle": 90.0,
+"gradient_radial": false
+},
 "effect_id": "gradient",
 "settings": {
-"background_gradient": SubResource("Gradient_basebg"),
+"background_gradient": SubResource("Gradient_xn7it"),
 "gradient_angle": 90.0,
 "gradient_radial": false
 }
 }, {
+"dark_settings": {
+"icon_color": Color(0, 0, 0, 1),
+"icon_scale": 1.2000000000000002,
+"num_icons": 21.0,
+"orbit_radius": 2.4,
+"orbit_speed": 0.15000000000000002,
+"time_scale": 0.4
+},
 "effect_id": "cafeos",
 "settings": {
-"icon_scale": 0.7,
+"icon_scale": 1.2000000000000002,
 "num_icons": 21.0,
 "orbit_radius": 2.4,
 "orbit_speed": 0.15000000000000002,
 "time_scale": 0.4
 }
-}],
-"overlays": []
+}]
 },
 "library_card_content_alignment": 0,
 "library_card_display_mode": 2,
 "library_card_show_platform": true,
 "library_card_text_alignment": 0,
 "library_card_text_focused_only": false,
-"library_card_zoom": 0.22214574277404145,
+"library_card_zoom": 0.17907087079026432,
 "library_card_zoom_level": 1,
 "library_card_zoom_list": 0.25,
 "library_focus_centering": 0,
-"library_focus_gradient_anim": 0,
+"library_focus_gradient_anim": 1,
 "library_focus_idle_anim": 0,
 "library_focus_movement_anim": 2,
-"library_focus_palette": 0,
-"library_focus_ring_color_mode": 0,
-"library_focus_ring_glow_intensity": 0.6,
+"library_focus_palette": 6,
+"library_focus_ring_color_mode": 1,
+"library_focus_ring_glow_intensity": 0.4,
 "library_focus_ring_neon_glow": true,
-"library_focus_ring_shape": 1,
+"library_focus_ring_shape": 0,
 "library_focus_ring_thickness": 5.5,
-"library_focus_scale": 0.04,
-"library_focus_source": 1,
-"library_grid_padding": 15,
+"library_focus_scale": 0.03,
+"library_focus_source": 0,
+"library_grid_padding": 30,
 "library_grid_staggered": false,
 "library_grid_vertical": false,
 "library_layout_mode": 0,

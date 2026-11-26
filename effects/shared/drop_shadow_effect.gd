@@ -23,6 +23,11 @@ func _setup_shader() -> void:
 	var mat = _material as ShaderMaterial
 	mat.shader = preload("res://shaders/card/drop_shadow.gdshader")
 
+func set_z_index(value: int) -> void:
+	# The automatic base image uses z=0. Shadows are always behind it, regardless
+	# of their configuration position; interior alpha is handled by compositing.
+	super.set_z_index(-maxi(1, value))
+
 func get_draw_rect() -> Rect2:
 	if not media_container:
 		return Rect2()

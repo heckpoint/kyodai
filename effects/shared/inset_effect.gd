@@ -17,6 +17,8 @@ func _init() -> void:
 func get_inset_pixels(card_size: Vector2) -> float:
 	return maxf(0.0, float(_settings.get("inset_ratio", 0.0)) * card_size.x)
 
+# Internal asymmetric aperture support for launch transitions. The designer
+# exposes only the uniform inset above.
 func get_top_inset_pixels(card_size: Vector2) -> float:
 	return maxf(0.0, float(_settings.get("top_inset_ratio", 0.0)) * card_size.y)
 
@@ -30,10 +32,4 @@ func get_settings_schema() -> Array[SettingsVar]:
 	var inset_var = SettingsVar.new(Type.FLOAT, 0.0, State.ENABLED, "Inset", "Ratio of card width", 0.0, 0.5, 0.001)
 	inset_var.property_name = "inset_ratio"
 	schema.append(inset_var)
-	var top_var = SettingsVar.new(Type.FLOAT, 0.0, State.ENABLED, "Top Inset", "Ratio of card height; used for asymmetric media layouts", 0.0, 0.5, 0.001)
-	top_var.property_name = "top_inset_ratio"
-	schema.append(top_var)
-	var left_var = SettingsVar.new(Type.FLOAT, 0.0, State.ENABLED, "Left Inset", "Ratio of card width; used for asymmetric media layouts", 0.0, 0.5, 0.001)
-	left_var.property_name = "left_inset_ratio"
-	schema.append(left_var)
 	return schema

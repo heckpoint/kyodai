@@ -83,6 +83,7 @@ func _setup_ui():
 	hsplit.add_child(right_container)
 
 	var library_bg = preload("res://components/library_background.tscn").instantiate()
+	library_bg.preview_mode = true
 	library_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	right_container.add_child(library_bg)
 	_preview_background = library_bg

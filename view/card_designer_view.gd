@@ -151,11 +151,15 @@ func _setup_ui():
 	
 	# Add library background to show cards in context
 	var library_bg = preload("res://components/library_background.tscn").instantiate()
+	library_bg.preview_mode = true
 	library_bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	right_container.add_child(library_bg)
 	_preview_background = library_bg
 	
 	var preview_container = CenterContainer.new()
+	# Keep the interactive card above every background effect layer without
+	# changing the live library or the background preview's own local Z-band.
+	preview_container.z_index = 100
 	preview_container.set_anchors_preset(Control.PRESET_FULL_RECT)
 	right_container.add_child(preview_container)
 	

@@ -23,6 +23,7 @@ var _last_parent_rid: RID = RID()
 var _material: ShaderMaterial = null
 var _visible: bool = true
 var _z_index: int = 0
+var _content_transform: Transform2D = Transform2D.IDENTITY
 
 var _last_offset_rect: Rect2 = Rect2()
 
@@ -120,6 +121,7 @@ func free_rid() -> void:
 	_material = null
 	_last_offset_rect = Rect2()
 	_last_parent_rid = RID()
+	_content_transform = Transform2D.IDENTITY
 
 func ensure_canvas_item(parent_rid: RID) -> RID:
 	if not _canvas_item_rid.is_valid():
@@ -133,6 +135,17 @@ func ensure_canvas_item(parent_rid: RID) -> RID:
 
 func set_parent_rid(parent_rid: RID) -> void:
 	ensure_canvas_item(parent_rid)
+
+## Media-local source transform supplied by EffectStack. Shaders that sample
+## the cover apply this to texture coordinates; draw geometry never moves.
+func set_content_transform(value: Transform2D) -> void:
+	if _content_transform == value:
+		return
+	_content_transform = value
+	_set_shader_param("source_transform_x", value.x)
+	_set_shader_param("source_transform_y", value.y)
+	_set_shader_param("source_transform_origin", value.origin)
+	_set_shader_param("source_transform_active", 0 if value == Transform2D.IDENTITY else 1)
 
 func set_z_index(value: int) -> void:
 	_z_index = value
@@ -287,7 +300,7 @@ func _apply_tweened_settings(temp_settings: Dictionary) -> void:
 	if media_container:
 		var needs_refresh = false
 		match effect_id:
-			"stroke", "inset":
+			"stroke", "inset", "transform":
 				# Geometry is derived from the ordered stack, so focus tweens must
 				# recompute layer depths and the final media aperture.
 				needs_refresh = true

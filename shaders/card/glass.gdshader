@@ -1,5 +1,5 @@
 shader_type canvas_item;
-render_mode blend_add;
+render_mode blend_premul_alpha;
 
 #include "res://shaders/card/includes/card_common.gdshaderinc"
 
@@ -162,15 +162,15 @@ void fragment() {
 	// Final color: lights + glass tint
 	vec3 final_rgb = lights + glass_tint;
 	
-	// Calculate lights intensity for alpha
+	// Calculate light intensity for emission weighting
 	float lights_intensity = length(lights) + glass_color.a;
 	
-	// Final alpha:
-	// - edge_alpha controls the outer glass shape
-	// - image_aa controls where the base image shows through (0 in corners)
-	// - lights always show through, even in corners
-	float content_alpha = max(image_aa, lights_intensity);
-	float final_alpha = edge_alpha * content_alpha * effect_alpha;
-	
-	COLOR = vec4(final_rgb, final_alpha) * COLOR;
+	// Additive glass is emission, not additional surface coverage. Weight the
+	// radiance exactly once and leave alpha at zero so this layer cannot inflate
+	// a CanvasGroup's alpha or create dark fringes during final compositing.
+	float content_weight = max(image_aa, lights_intensity);
+	float emission_weight = edge_alpha * content_weight * effect_alpha;
+	vec4 modulate = COLOR;
+	vec3 emission = final_rgb * emission_weight * modulate.rgb * modulate.a;
+	COLOR = vec4(emission, 0.0);
 }

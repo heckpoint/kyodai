@@ -13,6 +13,8 @@ const EFFECT_REGISTRY: Dictionary = {
 	"motes": "res://effects/background/motes_background_effect.gd",
 	"osdsys": "res://effects/background/osdsys_background_effect.gd",
 	"cafeos": "res://effects/background/cafeos_background_effect.gd",
+	"bokeh": "res://effects/background/bokeh_background_effect.gd",
+	"transform": "res://effects/background/transform_background_effect.gd",
 	"isolines": "res://effects/background/isolines_background_effect.gd",
 	"dotgrid": "res://effects/background/dotgrid_background_effect.gd",
 	"horizon3d": "res://effects/background/horizon3d_background_effect.gd",
@@ -27,6 +29,8 @@ const EFFECT_DISPLAY_NAMES: Dictionary = {
 	"motes": "Motes",
 	"osdsys": "OSDSYS",
 	"cafeos": "CafeOS",
+	"bokeh": "Bokeh",
+	"transform": "Transform",
 	"isolines": "Isolines",
 	"dotgrid": "Dot Grid",
 	"horizon3d": "Horizon3D",
@@ -42,6 +46,10 @@ const OVERLAY_REGISTRY: Dictionary = {
 const LAYER_BACKGROUND := "background"
 const LAYER_SHARED := "shared"
 
+## Designer previews live inside ordinary Controls, not the library's global
+## Z-band. Enable before adding to the tree so the host panel cannot cover them.
+var preview_mode: bool = false
+
 var _config: Dictionary = {}
 var _base_rect: ColorRect = null
 
@@ -49,11 +57,15 @@ var _base_rect: ColorRect = null
 var _layers: Array = []
 
 func _ready():
-	# Keep the entire background composition below card content even when its
-	# children use positive draw indices. Child Z values remain relative to this
-	# root, preserving the configured effect order without crossing into cards.
-	z_as_relative = false
-	z_index = OverlayLayers.LIBRARY_BACKGROUND_Z
+	if preview_mode:
+		z_as_relative = true
+		z_index = 0
+	else:
+		# Keep the entire background composition below card content even when its
+		# children use positive draw indices. Child Z values remain relative to this
+		# root, preserving the configured effect order without crossing into cards.
+		z_as_relative = false
+		z_index = OverlayLayers.LIBRARY_BACKGROUND_Z
 	_initialize_background()
 	resized.connect(_on_resized)
 
@@ -75,7 +87,8 @@ func _on_resized() -> void:
 	for layer in _layers:
 		if layer.kind == LAYER_BACKGROUND:
 			if layer.viewport:
-				layer.viewport.size = _get_scaled_effect_size(layer.node)
+				# SubViewportContainer owns the viewport size. stretch_shrink handles
+				# low-resolution rendering without leaving the effect node half-sized.
 				layer.node.size = Vector2(layer.viewport.size)
 			else:
 				layer.node.size = size
@@ -184,7 +197,12 @@ func _build_background_layer(entry: Dictionary, effect: BackgroundEffect, draw_i
 		effect.visible = true
 		effect.initialize(entry.get("settings", {}))
 		var container := SubViewportContainer.new()
+		if effect.output_premultiplied_alpha:
+			var container_material := CanvasItemMaterial.new()
+			container_material.blend_mode = CanvasItemMaterial.BLEND_MODE_PREMULT_ALPHA
+			container.material = container_material
 		container.stretch = true
+		container.stretch_shrink = maxi(1, int(round(1.0 / maxf(effect.render_scale, 0.01))))
 		container.set_anchors_preset(Control.PRESET_FULL_RECT)
 		container.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		container.z_index = draw_index

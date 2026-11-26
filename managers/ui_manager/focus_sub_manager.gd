@@ -88,7 +88,7 @@ var stroke_width_dp: float = 3.0:
 		_on_config_changed()
 
 ## Outset between the control's reported rect and the ring.
-var offset_dp: float = 6.0:
+var offset_dp: float = 5.0:
 	set(value):
 		offset_dp = value
 		_on_config_changed()
@@ -642,7 +642,7 @@ func _resolve_gradient_colors(geo: Dictionary) -> Array[Color]:
 
 func _expand_gradient_color(base_color: Color) -> Array[Color]:
 	var colors: Array[Color] = []
-	var saturation := clampf(maxf(base_color.s, 0.60), 0.0, 0.96)
+	var saturation := 0.0 if is_zero_approx(base_color.s) else clampf(maxf(base_color.s, 0.60), 0.0, 0.96)
 	var value := clampf(maxf(base_color.v, 0.92), 0.0, 1.0)
 	for i in range(5):
 		var hue := fposmod(base_color.h + float(GRADIENT_HUE_OFFSETS[i]), 1.0)
@@ -688,7 +688,8 @@ func _apply_color(geo: Dictionary) -> void:
 	if neon_glow:
 		# Keep the hue, but give the core a brighter, slightly white-hot center.
 		var core := source_color.lerp(Color.WHITE, 0.08)
-		core.s = clampf(core.s, 0.65, 1.0)
+		if not is_zero_approx(source_color.s):
+			core.s = clampf(core.s, 0.65, 1.0)
 		core.v = clampf(core.v, 0.9, 1.0)
 		core.a = source_color.a
 		_ring_color = core
@@ -715,8 +716,12 @@ func _redraw_ring() -> void:
 	_ring_style.border_color = base_color
 	_ring_style.shadow_color = Color(base_color.r, base_color.g, base_color.b, base_color.a * glow_intensity * 0.65) if neon_glow else Color.TRANSPARENT
 	var offset := M3Units.dp(offset_dp)
-	var rect := _ring_rect.grow(offset)
-	var radius := minf(_ring_radius + offset, minf(rect.size.x, rect.size.y) * 0.5)
+	var stroke_width := M3Units.dpi(stroke_width_dp)
+	# Stroke rasterization is centered on this rect. Move its centerline out by
+	# half the stroke so the inner edge stays exactly at the configured outset.
+	var geometry_offset := offset + stroke_width * 0.5
+	var rect := _ring_rect.grow(geometry_offset)
+	var radius := minf(_ring_radius + geometry_offset, minf(rect.size.x, rect.size.y) * 0.5)
 	if _pop_scale != 1.0:
 		var center := rect.get_center()
 		rect = Rect2(center - rect.size * _pop_scale * 0.5, rect.size * _pop_scale)
@@ -773,7 +778,8 @@ func _draw_neon_corners(rect: Rect2, radius: float, color: Color) -> void:
 	var width := M3Units.dp(stroke_width_dp)
 	if width <= 0.0:
 		return
-	var r := Rect2(rect.position + Vector2.ONE * width * 0.5, rect.size - Vector2.ONE * width)
+	# The incoming rect already includes the half-stroke outward offset.
+	var r := rect
 	if r.size.x <= 0.0 or r.size.y <= 0.0:
 		return
 	radius = minf(radius, minf(r.size.x, r.size.y) * 0.5)
@@ -994,8 +1000,9 @@ func _draw_corners(rect: Rect2, radius: float) -> void:
 	var width := M3Units.dp(stroke_width_dp)
 	if width <= 0.0:
 		return
-	# Inset by half the stroke so ticks stay inside the grown rect.
-	var r := Rect2(rect.position + Vector2.ONE * width * 0.5, rect.size - Vector2.ONE * width)
+	# Match the shader/full-ring centerline. The caller already grew the rect
+	# by half the stroke, so no further inset is needed.
+	var r := rect
 	if r.size.x <= 0.0 or r.size.y <= 0.0:
 		return
 	radius = minf(radius, minf(r.size.x, r.size.y) * 0.5)

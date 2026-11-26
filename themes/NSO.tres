@@ -2,40 +2,53 @@
 
 [ext_resource type="Script" path="res://base_class/abstract/theme_preset.gd" id="1_ca4q8"]
 
+[sub_resource type="Gradient" id="Gradient_mxtft"]
+colors = PackedColorArray(0.0071870177, 0.0071870144, 0.007187008, 1, 0.0071870177, 0.0071870144, 0.007187008, 1)
+
 [sub_resource type="Gradient" id="Gradient_vxs45"]
 colors = PackedColorArray(0.20784314, 0.20784314, 0.20784314, 1, 0.20784314, 0.20784314, 0.20784314, 1)
 
 [resource]
 script = ExtResource("1_ca4q8")
 name = "NSO"
-created_at = "2026-08-18T20:13:24"
+created_at = "2026-11-26T01:46:04"
 values = {
 "card_effect_config": {
 "card_orientation": 2,
 "card_rounding": 0.0,
 "effects": [{
-"layer_id": "nso_hsl",
-"effect_id": "hsl",
-"settings": {
+"dark_settings": {
 "hue_shift": 0.0,
 "lightness_scale": 0.09,
+"saturation_scale": 0.17
+},
+"effect_id": "hsl",
+"layer_id": "nso_hsl",
+"light_settings": {
+"hue_shift": 0.0,
+"lightness_scale": 0.09,
+"saturation_scale": 0.17
+},
+"settings": {
+"hue_shift": 0.0,
+"lightness_scale": 0.02,
 "saturation_scale": 0.17
 }
 }],
 "focus_effects": [{
-"layer_id": "nso_focus_hsl",
 "effect_id": "hsl",
-"target_layer_id": "nso_hsl",
+"layer_id": "nso_focus_hsl",
 "settings": {
 "hue_shift": 0.0,
 "lightness_scale": 0.99,
 "saturation_scale": 1.0
-}
+},
+"target_layer_id": "nso_hsl"
 }],
 "hero_height": 4
 },
 "card_media_aspect_ratio": 1,
-"dark_mode": false,
+"dark_mode": true,
 "frosted_look": true,
 "hero_effect_config": {
 "corner_radius": 0.06,
@@ -45,40 +58,44 @@ values = {
 "library_background_config": {
 "effects": [{
 "effect_id": "gradient",
-"settings": {
+"light_settings": {
 "background_gradient": SubResource("Gradient_vxs45"),
 "gradient_angle": 90.0,
 "gradient_radial": false
+},
+"settings": {
+"background_gradient": SubResource("Gradient_mxtft"),
+"gradient_angle": 90.0,
+"gradient_radial": false
 }
-}],
-"overlays": []
+}]
 },
 "library_card_content_alignment": 0,
-"library_card_display_mode": 2,
+"library_card_display_mode": 0,
 "library_card_show_platform": true,
 "library_card_text_alignment": 0,
-"library_card_text_focused_only": false,
+"library_card_text_focused_only": true,
 "library_card_zoom": 0.3032013101600298,
 "library_card_zoom_level": -1,
 "library_card_zoom_list": 0.25,
 "library_focus_centering": 0,
 "library_focus_gradient_anim": 0,
-"library_focus_idle_anim": 2,
+"library_focus_idle_anim": 1,
 "library_focus_movement_anim": 2,
-"library_focus_palette": 0,
+"library_focus_palette": 3,
 "library_focus_ring_color_mode": 0,
-"library_focus_ring_glow_intensity": 0.6,
+"library_focus_ring_glow_intensity": 0.35,
 "library_focus_ring_neon_glow": true,
 "library_focus_ring_shape": 0,
-"library_focus_ring_thickness": 5.5,
-"library_focus_scale": 0.0,
-"library_focus_source": 1,
+"library_focus_ring_thickness": 2.0,
+"library_focus_scale": 0.12,
+"library_focus_source": 0,
 "library_grid_padding": 0,
 "library_grid_staggered": false,
 "library_grid_vertical": true,
 "library_layout_mode": 0,
 "library_navigation_type": 1,
 "library_pagination_view": false,
-"library_primary_color": Color(0.87058824, 0, 0.06666667, 1),
+"library_primary_color": Color(1, 1, 1, 1),
 "library_show_title_mode": 0
 }
