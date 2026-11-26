@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
 
 env:
-  GODOT_VERSION: 4.7
+  GODOT_VERSION: 4.7.2
 
 jobs:
   vectors:

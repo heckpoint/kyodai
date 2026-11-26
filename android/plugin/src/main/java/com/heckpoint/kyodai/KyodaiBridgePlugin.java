@@ -73,7 +73,11 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     private static final int REQUEST_SAF_TREE = 0x5AF1;
     private static final String DOCS_AUTHORITY = "com.android.externalstorage.documents";
     private Activity activity;
-    private BroadcastReceiver extractionReceiver;
+    // Registered against the Application context (never the Activity), so an
+    // activity recreate can't leak it (IntentReceiverLeaked). Static so a
+    // re-created plugin instance can clean up a receiver orphaned by a
+    // previous instance whose onMainDestroy never ran.
+    private static BroadcastReceiver extractionReceiver;
     private WindowFocusGuard windowFocusGuard;
     private ComponentCallbacks2 trimMemoryCallbacks;
     private TaskBackendRouter taskBackend;
@@ -251,7 +255,20 @@ public class KyodaiBridgePlugin extends GodotPlugin {
     
     private void registerExtractionReceiver() {
         if (activity == null) return;
-        
+
+        final Context appContext = activity.getApplicationContext();
+        if (extractionReceiver != null) {
+            // A previous plugin instance (pre-activity-recreate) left a
+            // receiver registered; drop it so extraction_complete is never
+            // delivered twice.
+            try {
+                appContext.unregisterReceiver(extractionReceiver);
+            } catch (IllegalArgumentException e) {
+                // Already unregistered - nothing to do
+            }
+            extractionReceiver = null;
+        }
+
         extractionReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
@@ -268,22 +285,23 @@ public class KyodaiBridgePlugin extends GodotPlugin {
         
         IntentFilter filter = new IntentFilter(ACTION_EXTRACTION_COMPLETE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            activity.registerReceiver(extractionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            appContext.registerReceiver(extractionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
-            activity.registerReceiver(extractionReceiver, filter);
+            appContext.registerReceiver(extractionReceiver, filter);
         }
-        Log.d(TAG, "Registered extraction completion receiver");
+        Log.d(TAG, "Registered extraction completion receiver (application context)");
     }
 
     @Override
     public void onMainDestroy() {
         destroyed = true;
-        // The receiver is registered against the Activity context; without an
-        // unregister the Activity leaks it on recreation (IntentReceiverLeaked)
-        // and the destroy stalls long enough to race resume-time restore work.
+        // The receiver is registered against the Application context, so it
+        // survives activity recreation without leaking. Unregister it here
+        // anyway when the whole plugin is torn down; a missed destroy is
+        // cleaned up by the next registerExtractionReceiver() call.
         if (extractionReceiver != null && activity != null) {
             try {
-                activity.unregisterReceiver(extractionReceiver);
+                activity.getApplicationContext().unregisterReceiver(extractionReceiver);
             } catch (IllegalArgumentException e) {
                 // Never registered or already unregistered - nothing to do
             }

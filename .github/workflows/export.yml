@@ -15,8 +15,12 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  GODOT_VERSION: 4.7
-  GODOT_BIN: Godot_v4.7-stable_linux.x86_64
+  # 4.7.2 includes the Android Vulkan surface-lifecycle fixes (godot#121670
+  # + follow-up godot#121917): creating the swapchain while the surface is
+  # being destroyed used to fail DisplayServer creation and SIGSEGV the
+  # VkThread - the cold-start black-screen/crash-loop seen on Odin 3.
+  GODOT_VERSION: 4.7.2
+  GODOT_BIN: Godot_v4.7.2-stable_linux.x86_64
   # SHA-256 cert fingerprint of the persistent Android signing key
   # (~/.android/kyodai-release.keystore, mirrored into the
   # ANDROID_KEYSTORE_BASE64 secret). Cert fingerprints aren't sensitive.

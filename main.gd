@@ -238,6 +238,11 @@ func _ready():
 			UIManager.toolbar.persist_settled_zoom(grid)
 	if DEBUG_LOG: print("[Main] Settle block total elapsed_us=", Time.get_ticks_usec() - settle_start_us)
 
+	# Self-healing for the Android "live engine, black screen" surface-loss
+	# failure: arms only after startup settles, no-ops on desktop and in the
+	# headless companion (which returned early above). See BlackScreenWatchdog.
+	add_child(BlackScreenWatchdog.new())
+
 	# Compile all shader pipelines in the background so the first scroll/focus
 	# doesn't pay lazy-compile hitches. Deferred + internally delayed so first
 	# paint and grid settle win the main thread.
